@@ -1,0 +1,34 @@
+{
+  "name": "moskee-backend-api",
+  "version": "1.0.0",
+  "description": "Backend API voor Moskee Leerling Volgsysteem - Al-Hijra",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo 'No build step needed for this project'",
+    "test": "echo 'Tests will be added later'"
+  },
+  "keywords": [
+    "mosque",
+    "education", 
+    "management",
+    "students",
+    "al-hijra"
+  ],
+  "author": "Al-Hijra Moskee",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "axios": "^1.6.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/moskee-backend.git"
+  }
+}
