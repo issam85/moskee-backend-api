@@ -8,8 +8,14 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
+// NIEUWE CODE:
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://vercel.app', 'https://*.vercel.app'],
+  origin: [
+    'http://localhost:3000', 
+    'https://vercel.app', 
+    'https://*.vercel.app',
+    'https://moskee-systeem-iujmpp594-issams-projects-83c866b9.vercel.app'
+  ],
   credentials: true
 }));
 app.use(express.json());
