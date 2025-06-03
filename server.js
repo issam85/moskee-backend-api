@@ -1,5 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.2.2 - ECHT All-Inclusive met Staffel, M365 fixes
+// Versie: 2.2.2 - ECHT All-Inclusive met Staffel, M365 fixes & Uitgebreide M365 Logging
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -186,8 +186,8 @@ app.put('/api/mosques/:mosqueId/m365-settings', async (req, res) => {
             m365_configured: !!m365_configured, updated_at: new Date()
         };
         if (m365_client_secret && m365_client_secret.trim() !== '') {
-            updatePayload.m365_client_secret = m365_client_secret;
-            console.log(`[M365 Update] m365_client_secret wordt bijgewerkt voor mosque ${mosqueId}.`);
+            updatePayload.m365_client_secret = m365_client_secret; // Client secret wordt hier direct opgeslagen
+            console.log(`[M365 Update] m365_client_secret wordt bijgewerkt voor mosque ${mosqueId}. Length: ${m365_client_secret.length}`);
         }
         const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId)
             .select('id, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured') // Stuur secret NIET terug
@@ -351,49 +351,255 @@ app.post('/api/payments', async (req, res) => {
 });
 
 // EMAIL & CONFIG ROUTES
+// =========================================================================================
+// START VERVANGEN BLOK: POST /api/send-email-m365 MET UITGEBREIDE LOGGING
+// =========================================================================================
 app.post('/api/send-email-m365', async (req, res) => {
-  try {
-    let { tenantId, clientId, clientSecret: clientSecretFromFrontend, to, subject, body, mosqueName, mosqueId, explicitSenderForTest } = req.body;
-    if (!to || !subject || !body) return sendError(res, 400, 'M365 email: To, Subject, and Body zijn verplicht.', null, req);
-    let actualClientSecret = clientSecretFromFrontend; let actualTenantId = tenantId; let actualClientId = clientId; let senderToUse = explicitSenderForTest; let mosqueInDB = null;
+  console.log("\n-----------------------------------------------------");
+  console.log("Backend: /api/send-email-m365 route HIT");
+  console.log("Backend: Raw req.body received:", JSON.stringify(req.body, null, 2));
 
-    if ((!actualTenantId || !actualClientId || !senderToUse || (!actualClientSecret && !clientSecretFromFrontend)) && mosqueId) {
-        console.log(`[M365 Send] Some M365 params missing, fetching from DB for mosqueId: ${mosqueId}`);
-        const { data, error: mosqueDbError } = await supabase.from('mosques').select('m365_tenant_id, m365_client_id, m365_client_secret, m365_sender_email, m365_configured, name').eq('id', mosqueId).single();
-        if (mosqueDbError || !data) return sendError(res, 404, 'Moskee config niet gevonden in DB.', null, req);
-        mosqueInDB = data;
-        if (!mosqueInDB.m365_configured) return sendError(res, 400, 'M365 is niet geconfigureerd voor deze moskee in de DB.', null, req);
-        if (!actualTenantId) actualTenantId = mosqueInDB.m365_tenant_id;
-        if (!actualClientId) actualClientId = mosqueInDB.m365_client_id;
-        if (!senderToUse) senderToUse = mosqueInDB.m365_sender_email;
-        if (!actualClientSecret && mosqueInDB.m365_client_secret) { actualClientSecret = mosqueInDB.m365_client_secret; console.log("[M365 Send] Using stored client secret from DB."); }
-        if (!mosqueName && mosqueInDB.name) mosqueName = mosqueInDB.name;
+  // Haal de oorspronkelijke variabelen uit req.body zoals ze nu hebt
+  let {
+    to,
+    subject,
+    body,
+    mosqueId, // Dit zou mosque.id moeten zijn vanuit ParentsTab -> authHelpers
+    // De volgende komen mogelijk van de M365 test modal, of zijn null voor welkomstmails
+    tenantId: explicitTenantId, // Komt als 'tenantId' uit frontend body
+    clientId: explicitClientId, // Komt als 'clientId' uit frontend body
+    clientSecret: clientSecretFromFrontend, // Komt als 'clientSecret' uit frontend body
+    senderEmail: explicitSenderForTest, // Aangepast, komt als 'senderEmail' uit frontend body voor test
+    // m365FromMosqueObject: m365FromMosqueObject, // Deze gebruik je niet direct, je haalt het op
+    mosqueName: mosqueNameFromFrontend, // Mogelijk meegegeven, anders uit DB
+  } = req.body;
+
+  console.log(`Backend: Initial data from frontend - To: ${to}, Subject: ${subject ? subject.substring(0, 50) + '...' : 'No Subject'}`);
+  console.log(`Backend: mosqueId from frontend: ${mosqueId}`);
+  console.log(`Backend: explicitTenantId from frontend: ${explicitTenantId}`);
+  console.log(`Backend: explicitClientId from frontend: ${explicitClientId}`);
+  console.log(`Backend: clientSecretFromFrontend (present?): ${clientSecretFromFrontend ? 'Yes, length: ' + clientSecretFromFrontend.length : 'NOT PROVIDED'}`);
+  console.log(`Backend: explicitSenderForTest from frontend: ${explicitSenderForTest}`);
+  console.log(`Backend: mosqueNameFromFrontend: ${mosqueNameFromFrontend}`);
+
+
+  try {
+    if (!to || !subject || !body) {
+      console.error("Backend: M365 email: To, Subject, and Body zijn verplicht.");
+      return sendError(res, 400, 'M365 email: To, Subject, and Body zijn verplicht.', null, req);
     }
+
+    let actualTenantId = explicitTenantId;
+    let actualClientId = explicitClientId;
+    let actualClientSecret = clientSecretFromFrontend; // Start met wat eventueel van frontend komt (voor test-scenario)
+    let senderToUse = explicitSenderForTest;
+    let mosqueInDB = null;
+    let effectiveMosqueName = mosqueNameFromFrontend;
+
+    // Stap 1: Ophalen mosqueInDB indien nodig (cruciaal voor welkomstmails)
+    // Dit gebeurt als niet alle M365 parameters expliciet zijn meegegeven,
+    // OF als er geen clientSecretFromFrontend is (wat typisch is voor welkomstmails die de secret uit de DB halen).
+    if (!actualTenantId || !actualClientId || !senderToUse || (!actualClientSecret && !clientSecretFromFrontend) ) {
+      if (!mosqueId) {
+        console.error("Backend: mosqueId is MISSING, and M365 params are incomplete. Cannot fetch from DB.");
+        return sendError(res, 400, "mosqueId is vereist als M365 configuratie niet volledig is meegegeven of als secret uit DB moet komen.", null, req);
+      }
+      console.log(`Backend: Some M365 params (tenant, client, sender, or secret) are missing or clientSecretFromFrontend is not provided. Attempting to fetch mosqueInDB with ID: ${mosqueId}`);
+
+      const { data, error: mosqueDbError } = await supabase
+        .from('mosques')
+        .select('id, name, m365_tenant_id, m365_client_id, m365_sender_email, m365_client_secret, m365_configured')
+        .eq('id', mosqueId)
+        .single();
+
+      if (mosqueDbError) {
+        console.error("Backend: Error fetching mosqueInDB from Supabase:", mosqueDbError);
+        return sendError(res, 500, "Database error fetching mosque details", mosqueDbError.message, req);
+      }
+      if (!data) {
+        console.error(`Backend: No mosqueInDB found for ID: ${mosqueId}`);
+        return sendError(res, 404, "Mosque not found in database for M365 config.", null, req);
+      }
+      mosqueInDB = data;
+      console.log("Backend: mosqueInDB fetched successfully:", JSON.stringify({
+          id: mosqueInDB.id,
+          name: mosqueInDB.name,
+          m365_configured: mosqueInDB.m365_configured,
+          m365_tenant_id: mosqueInDB.m365_tenant_id,
+          m365_client_id: mosqueInDB.m365_client_id,
+          m365_sender_email: mosqueInDB.m365_sender_email,
+          m365_client_secret_length: mosqueInDB.m365_client_secret ? mosqueInDB.m365_client_secret.length : 0,
+          // VOORZICHTIG: Log nooit de hele secret. Preview voor lokaal debuggen:
+          // m365_client_secret_preview: mosqueInDB.m365_client_secret ? mosqueInDB.m365_client_secret.substring(0, 5) + "..." : "NOT SET"
+      }, null, 2));
+
+      if (!mosqueInDB.m365_configured) {
+        console.warn("Backend: M365 is not configured for this mosque in the DB (m365_configured=false).");
+        return sendError(res, 400, 'M365 is niet geconfigureerd voor deze moskee in de DB.', null, req);
+      }
+
+      // Vul ontbrekende waarden aan vanuit DB
+      if (!actualTenantId) actualTenantId = mosqueInDB.m365_tenant_id;
+      if (!actualClientId) actualClientId = mosqueInDB.m365_client_id;
+      if (!senderToUse) senderToUse = mosqueInDB.m365_sender_email;
+      if (!effectiveMosqueName) effectiveMosqueName = mosqueInDB.name; // Gebruik DB naam als niet van frontend
+
+      // BELANGRIJK: Client Secret voor welkomstmails (en andere backend-geïnitieerde emails)
+      // MOET uit de database komen als niet expliciet via 'clientSecretFromFrontend' meegegeven.
+      if (!clientSecretFromFrontend && mosqueInDB.m365_client_secret) { // Als geen secret van frontend, gebruik die van DB
+          actualClientSecret = mosqueInDB.m365_client_secret;
+          console.log("[M365 Send] Using stored client secret from DB for token request.");
+      } else if (clientSecretFromFrontend) { // Als wel secret van frontend, die is al in actualClientSecret
+          console.log("[M365 Send] Using client secret provided directly from frontend (likely for M365 test).");
+      }
+      // Als geen van beide een secret heeft, zal de check hieronder falen.
+    } else {
+        console.log("Backend: All explicit M365 parameters (tenantId, clientId, senderEmail, clientSecret) seem to be provided from frontend. Not fetching from DB initially for these.");
+        // Zorg dat effectiveMosqueName een waarde heeft als mosqueNameFromFrontend leeg was en we niet uit DB lazen
+        if (!effectiveMosqueName && mosqueId) {
+             const { data: mData, error: mError } = await supabase.from('mosques').select('name').eq('id', mosqueId).single();
+             if (!mError && mData) effectiveMosqueName = mData.name;
+             console.log(`[M365 Send] Fetched mosque name '${effectiveMosqueName}' for logging as it was not provided.`);
+        }
+    }
+
+    // Stap 2: Controleer de uiteindelijke credentials
+    console.log(`Backend: Final credentials for M365 token request:`);
+    console.log(`Backend:   actualTenantId: ${actualTenantId}`);
+    console.log(`Backend:   actualClientId: ${actualClientId}`);
+    console.log(`Backend:   senderToUse: ${senderToUse}`);
+    console.log(`Backend:   actualClientSecret (present?): ${actualClientSecret ? 'Yes, length: ' + actualClientSecret.length : 'NOT AVAILABLE'}`);
+    // console.log(`Backend:   actualClientSecret (preview): ${actualClientSecret ? actualClientSecret.substring(0,5) + "..." : "NOT AVAILABLE"}`);
 
     if (!actualTenantId || !actualClientId || !actualClientSecret || !senderToUse) {
-      const errorMsgDetails = `Tenant: ${!!actualTenantId}, ClientID: ${!!actualClientId}, ClientSecret: ${!!actualClientSecret}, Sender: ${!!senderToUse}`;
+      const errorMsgDetails = `TenantID: ${!!actualTenantId}, ClientID: ${!!actualClientId}, ClientSecret: ${!!actualClientSecret}, Sender: ${!!senderToUse}`;
+      console.error(`Backend: M365 email: Vereiste credentials/config ontbreken. ${errorMsgDetails}`);
       return sendError(res, 400, `M365 email: Vereiste credentials/config ontbreken. ${errorMsgDetails}`, null, req);
     }
-    
-    console.log(`[M365 Send] Final params for token - TenantID: ${actualTenantId}, ClientID: ${actualClientId}. Sender for Graph: ${senderToUse}`);
-    const tokenResponse = await axios.post( `https://login.microsoftonline.com/${actualTenantId}/oauth2/v2.0/token`, new URLSearchParams({ client_id: actualClientId, client_secret: actualClientSecret, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials'}), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    const accessToken = tokenResponse.data.access_token;
-    
-    console.log(`📤 Sending M365 email from: ${senderToUse} to: ${to}...`);
-    const emailResponse = await axios.post( `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`, { message: { subject, body: { contentType: 'Text', content: body }, toRecipients: [{ emailAddress: { address: to } }] } }, { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } });
-    
-    const effectiveMosqueId = mosqueId || mosqueInDB?.id;
-    if (effectiveMosqueId && mosqueName) {
-      await supabase.from('email_logs').insert([{ mosque_id: effectiveMosqueId, recipient_email: to, subject, body, email_type: clientSecretFromFrontend ? 'm365_test_email' : 'm365_app_email', sent_status: 'sent', microsoft_message_id: emailResponse.headers['request-id'], sent_at: new Date() }]);
+
+    // Stap 3: Token Request
+    const tokenUrl = `https://login.microsoftonline.com/${actualTenantId}/oauth2/v2.0/token`;
+    const tokenParams = new URLSearchParams();
+    tokenParams.append('client_id', actualClientId);
+    tokenParams.append('scope', 'https://graph.microsoft.com/.default');
+    tokenParams.append('client_secret', actualClientSecret);
+    tokenParams.append('grant_type', 'client_credentials');
+
+    console.log(`Backend: Attempting to get M365 token from: ${tokenUrl} for client_id: ${actualClientId}`);
+    let tokenResponseData;
+    try {
+      const response = await axios.post(tokenUrl, tokenParams, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      tokenResponseData = response.data;
+      console.log("Backend: M365 Token received successfully (status " + response.status + ")");
+      console.log("Backend: Token data has 'access_token':", tokenResponseData && !!tokenResponseData.access_token);
+    } catch (error) {
+      console.error("Backend: ERROR during M365 token request!");
+      if (error.response) {
+        console.error("Backend: Token Request Error Status:", error.response.status);
+        console.error("Backend: Token Request Error Data:", JSON.stringify(error.response.data, null, 2));
+      } else if (error.request) {
+        console.error("Backend: Token Request - No response received:", error.request);
+      }
+      else {
+        console.error("Backend: Token Request Error Message:", error.message);
+      }
+      const errorDetails = error.response?.data || { message: error.message };
+      let statusCode = error.response?.status || 500;
+      if (error.isAxiosError && error.response?.status === 401) statusCode = 401; // Unauthorized, vaak bad secret
+      return sendError(res, statusCode, `M365 token error: ${errorDetails.error_description || errorDetails.error?.message || errorDetails.message || 'Failed to obtain token'}`, errorDetails, req);
     }
-    res.json({ success: true, messageId: emailResponse.headers['request-id'] || 'sent_' + Date.now(), service: 'Microsoft Graph API', sender: senderToUse });
-  } catch (error) {
-    const errorDetails = error.response?.data || { message: error.message };
-    let statusCode = error.response?.status || 500;
-    if (error.isAxiosError && error.response?.status === 401) statusCode = 401;
-    sendError(res, statusCode, `M365 email send error: ${errorDetails.error?.message || errorDetails.error || error.message}`, errorDetails, req);
+
+    const accessToken = tokenResponseData.access_token;
+    if (!accessToken) {
+        console.error("Backend: Access token was not found in the M365 token response.");
+        return sendError(res, 500, "M365 error: Access token missing in response.", tokenResponseData, req);
+    }
+
+    // Stap 4: Graph API sendMail
+    const sendMailUrl = `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`;
+    const emailPayload = {
+      message: {
+        subject: subject,
+        body: { contentType: 'HTML', content: body }, // Jouw authHelpers maakt HTML, dus 'HTML' is correct.
+        toRecipients: [{ emailAddress: { address: to } }]
+      },
+      saveToSentItems: 'true'
+    };
+
+    console.log(`Backend: Attempting to send email via Graph API. From: ${senderToUse}, To: ${to}, Subject: ${subject ? subject.substring(0,50)+'...' : 'No Subject'}`);
+    // console.log("Backend: Email payload (excluding body for brevity):", JSON.stringify({ ...emailPayload, message: { ...emailPayload.message, body: "HTML content..." }}, null, 2));
+
+    let emailApiResponse;
+    try {
+      emailApiResponse = await axios.post(sendMailUrl, emailPayload, {
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
+      });
+      console.log("Backend: Email sent successfully via Graph API (status " + emailApiResponse.status + "). MS Request ID:", emailApiResponse.headers['request-id']);
+    } catch (error) {
+      console.error("Backend: ERROR during Graph API sendMail request!");
+      if (error.response) {
+        console.error("Backend: Graph API Error Status:", error.response.status);
+        console.error("Backend: Graph API Error Data:", JSON.stringify(error.response.data, null, 2));
+      } else if (error.request) {
+        console.error("Backend: Graph API - No response received:", error.request);
+      }
+      else {
+        console.error("Backend: Graph API Error Message:", error.message);
+      }
+      const errorDetails = error.response?.data || { message: error.message };
+      return sendError(res, error.response?.status || 500, `Graph API sendMail error: ${errorDetails.error?.message || errorDetails.message || 'Failed to send email'}`, errorDetails, req);
+    }
+
+    // Stap 5: Log de email (optioneel, maar goed voor tracking)
+    const effectiveMosqueIdForLog = mosqueId || mosqueInDB?.id; // Zorg dat je een mosqueId hebt
+    const emailTypeForLog = clientSecretFromFrontend ? 'm365_test_email' : (subject.toLowerCase().includes('welkom') ? 'm365_welcome_email' : 'm365_app_email');
+
+    if (effectiveMosqueIdForLog) { // Alleen loggen als we een mosqueId hebben
+      try {
+        const { error: logInsertError } = await supabase.from('email_logs').insert([{
+          mosque_id: effectiveMosqueIdForLog,
+          recipient_email: to,
+          subject,
+          body: body.substring(0, 1000), // Beperk body lengte in log
+          email_type: emailTypeForLog,
+          sent_status: 'sent',
+          microsoft_message_id: emailApiResponse.headers['request-id'],
+          sent_at: new Date()
+        }]);
+        if (logInsertError) {
+            console.error("Backend: Failed to log email to Supabase 'email_logs':", logInsertError.message);
+        } else {
+            console.log("Backend: Email attempt logged to Supabase 'email_logs' table.");
+        }
+      } catch (logCatchError) { // Catch voor onverwachte errors bij het loggen zelf
+        console.error("Backend: Unexpected error during email logging to Supabase:", logCatchError.message);
+      }
+    } else {
+        console.warn("Backend: Email sent, but not logged to DB as effectiveMosqueIdForLog was not determined.");
+    }
+
+    res.json({
+      success: true,
+      message: 'Email sent successfully via Microsoft Graph API.',
+      messageId: emailApiResponse.headers['request-id'] || 'sent_' + Date.now(),
+      service: 'Microsoft Graph API',
+      sender: senderToUse
+    });
+
+  } catch (error) { // Algemene catch-all voor onverwachte fouten in de route
+    console.error("Backend: UNEXPECTED error in /api/send-email-m365 route:", error.message, error.stack);
+    // Gebruik de sendError helper voor een consistente response
+    sendError(res, 500, 'Internal server error in email sending process.', process.env.NODE_ENV !== 'production' ? error.message : undefined, req);
+  } finally {
+    console.log("Backend: /api/send-email-m365 route processing FINISHED");
+    console.log("-----------------------------------------------------\n");
   }
 });
+// =========================================================================================
+// EINDE VERVANGEN BLOK: POST /api/send-email-m365
+// =========================================================================================
 
 app.get('/api/config-check', (req, res) => {
   res.json({
@@ -406,7 +612,7 @@ app.get('/api/config-check', (req, res) => {
 app.use('*', (req, res) => {
   sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
-      'GET /api/mosque/:subdomain', 'PUT /api/mosques/:mosqueId', 
+      'GET /api/mosque/:subdomain', 'PUT /api/mosques/:mosqueId',
       'PUT /api/mosques/:mosqueId/m365-settings', 'PUT /api/mosques/:mosqueId/contribution-settings',
       'GET /api/mosques/:mosqueId/users', 'GET /api/users/:id', 'POST /api/users', 'PUT /api/users/:id', 'DELETE /api/users/:id',
       'GET /api/mosques/:mosqueId/classes','GET /api/classes/:id', 'POST /api/classes', 'PUT /api/classes/:id', 'DELETE /api/classes/:id',
@@ -427,7 +633,7 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Moskee Backend API v2.2.2 running on port ${PORT}`); // Versie update
+  console.log(`🚀 Moskee Backend API v2.2.2 (with enhanced M365 logging) running on port ${PORT}`); // Versie update
   console.log(`🔗 Base URL for API: (Your Railway public URL, e.g., https://project-name.up.railway.app)`);
   console.log(`🗄️ Supabase Project URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'Not configured'}`);
   if (process.env.NODE_ENV !== 'production') {
