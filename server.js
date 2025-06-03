@@ -1,5 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.2.0 - Railway + Supabase Compatible + CRUD + Configureerbare Staffel (All-Inclusive)
+// Versie: 2.2.2 - ECHT All-Inclusive met Staffel, M365 fixes
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -75,7 +75,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    version: '2.2.0', // Versie update
+    version: '2.2.2', // Versie update
     supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
   });
 });
@@ -130,7 +130,7 @@ app.post('/api/mosques/register', async (req, res) => {
         email: mosqueContactEmail || normalizedAdminEmail, website, m365_configured: false,
         contribution_1_child: 150, contribution_2_children: 300, contribution_3_children: 450,
         contribution_4_children: 450, contribution_5_plus_children: 450,
-        m365_sender_email: null,
+        m365_sender_email: null, // Nieuwe moskeeën hebben nog geen M365 sender email
     }]).select().single();
     if (mosqueCreateError) throw mosqueCreateError;
 
@@ -151,7 +151,7 @@ app.get('/api/mosque/:subdomain', async (req, res) => {
     const { subdomain } = req.params;
     const { data: mosque, error } = await supabase
       .from('mosques')
-      .select('id, name, subdomain, address, city, zipcode, phone, email, website, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured, contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children, created_at, updated_at')
+      .select('id, name, subdomain, address, city, zipcode, phone, email, website, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured, contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children, created_at, updated_at') // Expliciet select, m365_client_secret NIET hier
       .eq('subdomain', subdomain.toLowerCase().trim())
       .single();
     if (error || !mosque) return sendError(res, 404, 'Moskee niet gevonden.', null, req);
@@ -189,7 +189,8 @@ app.put('/api/mosques/:mosqueId/m365-settings', async (req, res) => {
             console.log(`[M365 Update] m365_client_secret wordt bijgewerkt voor mosque ${mosqueId}.`);
         }
         const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId)
-            .select('id, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured').single();
+            .select('id, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured') // Stuur secret NIET terug
+            .single();
         if (error) throw error;
         res.json({ success: true, message: "M365 instellingen bijgewerkt.", data });
     } catch (error) {
@@ -354,35 +355,55 @@ app.post('/api/send-email-m365', async (req, res) => {
     let { tenantId, clientId, clientSecret: clientSecretFromFrontend, to, subject, body, mosqueName, mosqueId, explicitSenderForTest } = req.body;
     if (!to || !subject || !body) return sendError(res, 400, 'M365 email: To, Subject, and Body zijn verplicht.', null, req);
     let actualClientSecret = clientSecretFromFrontend; let actualTenantId = tenantId; let actualClientId = clientId; let senderToUse = explicitSenderForTest; let mosqueInDB = null;
+
     if ((!actualTenantId || !actualClientId || !senderToUse || (!actualClientSecret && !clientSecretFromFrontend)) && mosqueId) {
+        console.log(`[M365 Send] Some M365 params missing, fetching from DB for mosqueId: ${mosqueId}`);
         const { data, error: mosqueDbError } = await supabase.from('mosques').select('m365_tenant_id, m365_client_id, m365_client_secret, m365_sender_email, m365_configured, name').eq('id', mosqueId).single();
-        if (mosqueDbError || !data) return sendError(res, 404, 'Moskee config niet gevonden.', null, req);
+        if (mosqueDbError || !data) return sendError(res, 404, 'Moskee config niet gevonden in DB.', null, req);
         mosqueInDB = data;
-        if (!mosqueInDB.m365_configured) return sendError(res, 400, 'M365 niet geconfigureerd in DB.', null, req);
-        if (!actualTenantId) actualTenantId = mosqueInDB.m365_tenant_id; if (!actualClientId) actualClientId = mosqueInDB.m365_client_id;
+        if (!mosqueInDB.m365_configured) return sendError(res, 400, 'M365 is niet geconfigureerd voor deze moskee in de DB.', null, req);
+        if (!actualTenantId) actualTenantId = mosqueInDB.m365_tenant_id;
+        if (!actualClientId) actualClientId = mosqueInDB.m365_client_id;
         if (!senderToUse) senderToUse = mosqueInDB.m365_sender_email;
-        if (!actualClientSecret && mosqueInDB.m365_client_secret) { actualClientSecret = mosqueInDB.m365_client_secret; console.log("[M365 Send] Using stored client secret from DB."); } // Alleen gebruiken als frontend geen stuurt EN het in DB staat
+        if (!actualClientSecret && mosqueInDB.m365_client_secret) { actualClientSecret = mosqueInDB.m365_client_secret; console.log("[M365 Send] Using stored client secret from DB."); }
         if (!mosqueName && mosqueInDB.name) mosqueName = mosqueInDB.name;
     }
-    if (!actualTenantId || !actualClientId || !actualClientSecret || !senderToUse) return sendError(res, 400, `M365 email: Vereiste credentials/config ontbreken. Tenant: ${!!actualTenantId}, Client: ${!!actualClientId}, Secret: ${!!actualClientSecret}, Sender: ${!!senderToUse}`, null, req);
-    console.log(`[M365 Send] Final params - TenantID: ${actualTenantId}, ClientID: ${actualClientId}, Sender: ${senderToUse}`);
+
+    if (!actualTenantId || !actualClientId || !actualClientSecret || !senderToUse) {
+      const errorMsgDetails = `Tenant: ${!!actualTenantId}, ClientID: ${!!actualClientId}, ClientSecret: ${!!actualClientSecret}, Sender: ${!!senderToUse}`;
+      return sendError(res, 400, `M365 email: Vereiste credentials/config ontbreken. ${errorMsgDetails}`, null, req);
+    }
+    
+    console.log(`[M365 Send] Final params for token - TenantID: ${actualTenantId}, ClientID: ${actualClientId}. Sender for Graph: ${senderToUse}`);
     const tokenResponse = await axios.post( `https://login.microsoftonline.com/${actualTenantId}/oauth2/v2.0/token`, new URLSearchParams({ client_id: actualClientId, client_secret: actualClientSecret, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials'}), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     const accessToken = tokenResponse.data.access_token;
+    
     console.log(`📤 Sending M365 email from: ${senderToUse} to: ${to}...`);
     const emailResponse = await axios.post( `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`, { message: { subject, body: { contentType: 'Text', content: body }, toRecipients: [{ emailAddress: { address: to } }] } }, { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } });
+    
     const effectiveMosqueId = mosqueId || mosqueInDB?.id;
-    if (effectiveMosqueId) { await supabase.from('email_logs').insert([{ mosque_id: effectiveMosqueId, recipient_email: to, subject, body, email_type: clientSecretFromFrontend ? 'm365_test_email' : 'm365_app_email', sent_status: 'sent', microsoft_message_id: emailResponse.headers['request-id'], sent_at: new Date() }]); }
+    if (effectiveMosqueId && mosqueName) {
+      await supabase.from('email_logs').insert([{ mosque_id: effectiveMosqueId, recipient_email: to, subject, body, email_type: clientSecretFromFrontend ? 'm365_test_email' : 'm365_app_email', sent_status: 'sent', microsoft_message_id: emailResponse.headers['request-id'], sent_at: new Date() }]);
+    }
     res.json({ success: true, messageId: emailResponse.headers['request-id'] || 'sent_' + Date.now(), service: 'Microsoft Graph API', sender: senderToUse });
   } catch (error) {
-    const errorDetails = error.response?.data || { message: error.message }; let statusCode = error.response?.status || 500;
-    if (error.isAxiosError && error.response?.status === 401) statusCode = 401; // Zorg dat 401 specifiek wordt
-    sendError(res, statusCode, `M365 email send error: ${errorDetails.error?.message || errorDetails.message || error.message}`, errorDetails, req);
+    const errorDetails = error.response?.data || { message: error.message };
+    let statusCode = error.response?.status || 500;
+    if (error.isAxiosError && error.response?.status === 401) statusCode = 401;
+    sendError(res, statusCode, `M365 email send error: ${errorDetails.error?.message || errorDetails.error || error.message}`, errorDetails, req);
   }
 });
-app.get('/api/config-check', (req, res) => { res.json({ hasSupabaseUrl: !!process.env.SUPABASE_URL, hasSupabaseKey: !!process.env.SUPABASE_SERVICE_KEY, defaultM365Sender: process.env.M365_SENDER_EMAIL || 'Not Set', nodeEnv: process.env.NODE_ENV, port: PORT }); });
 
-// Catch all & Global error handler
-app.use('*', (req, res) => { sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
+app.get('/api/config-check', (req, res) => {
+  res.json({
+    hasSupabaseUrl: !!process.env.SUPABASE_URL, hasSupabaseKey: !!process.env.SUPABASE_SERVICE_KEY,
+    defaultM365Sender: process.env.M365_SENDER_EMAIL || 'Not Set in Env', nodeEnv: process.env.NODE_ENV || 'development', port: PORT
+  });
+});
+
+// Catch all undefined routes
+app.use('*', (req, res) => {
+  sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
       'GET /api/mosque/:subdomain', 'PUT /api/mosques/:mosqueId', 
       'PUT /api/mosques/:mosqueId/m365-settings', 'PUT /api/mosques/:mosqueId/contribution-settings',
@@ -391,9 +412,26 @@ app.use('*', (req, res) => { sendError(res, 404, 'Route not found.', { path: req
       'GET /api/mosques/:mosqueId/students','GET /api/students/:id', 'POST /api/students', 'PUT /api/students/:id', 'DELETE /api/students/:id',
       'GET /api/mosques/:mosqueId/payments','GET /api/payments/:id', 'POST /api/payments', 'PUT /api/payments/:id', 'DELETE /api/payments/:id',
       'POST /api/send-email-m365'
-  ]}, req);});
-app.use((error, req, res, next) => { console.error('❌ Unhandled Server Error:', error.stack || error); const message = process.env.NODE_ENV === 'production' && !error.status ? 'Interne serverfout.' : error.message; res.status(error.status || 500).json({ success: false, error: message, ...(process.env.NODE_ENV !== 'production' && { details: error.stack }) }); });
+  ]}, req);
+});
 
-app.listen(PORT, () => { console.log(`🚀 Moskee Backend API v2.2.0 running on port ${PORT}`); console.log(`🔗 Base URL for API: (Your Railway public URL)`); console.log(`🗄️ Supabase Project URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'Not configured'}`); if (process.env.NODE_ENV !== 'production') { console.warn("⚠️ Running in development mode."); } });
+// Global error handling middleware
+app.use((error, req, res, next) => {
+  console.error('❌ Unhandled Server Error:', error.stack || error);
+  const message = process.env.NODE_ENV === 'production' && !error.status ? 'Interne serverfout.' : error.message;
+  res.status(error.status || 500).json({
+    success: false, error: message,
+    ...(process.env.NODE_ENV !== 'production' && { details: error.stack })
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Moskee Backend API v2.2.2 running on port ${PORT}`); // Versie update
+  console.log(`🔗 Base URL for API: (Your Railway public URL, e.g., https://project-name.up.railway.app)`);
+  console.log(`🗄️ Supabase Project URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'Not configured'}`);
+  if (process.env.NODE_ENV !== 'production') {
+    console.warn("⚠️ Running in development mode. Detailed errors might be exposed.");
+  }
+});
 
 module.exports = app;
