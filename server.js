@@ -60,6 +60,7 @@ app.use(cors({
     'https://www.mijnlvs.nl',
     'https://al-noor.mijnlvs.nl',
     'https://al-hijra.mijnlvs.nl',
+    'https://register.mijnlvs.nl',
   ],
   credentials: true
 }));
