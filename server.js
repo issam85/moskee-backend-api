@@ -1,5 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.2.3 - Welkomstmail bij ouder registratie & interne e-mail functie
+// Versie: 2.2.4 - Dynamische login link in welkomstmail
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -76,7 +76,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    version: '2.2.3', // Versie update
+    version: '2.2.4', // Versie update
     supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
   });
 });
@@ -242,10 +242,6 @@ app.post('/api/mosques/register', async (req, res) => {
     const { data: existingSubdomain } = await supabase.from('mosques').select('id').eq('subdomain', normalizedSubdomain).maybeSingle();
     if (existingSubdomain) return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
 
-    // Hier moet je controleren of de adminEmail al bestaat IN COMBINATIE MET de nieuwe mosque_id als die er al zou zijn,
-    // maar aangezien de moskee nog niet bestaat, is een globale check op email voor admins ook een optie,
-    // of je accepteert dat een admin email hergebruikt kan worden voor verschillende moskeeën.
-    // Voor nu: check of de adminEmail al bestaat als user (kan problemen geven als een admin van moskee A zich bij B registreert).
     const { data: existingAdminEmailUser } = await supabase.from('users').select('id').eq('email', normalizedAdminEmail).maybeSingle();
     if (existingAdminEmailUser) return sendError(res, 409, 'Dit emailadres voor de beheerder is al geregistreerd in het systeem.', null, req);
 
@@ -262,14 +258,11 @@ app.post('/api/mosques/register', async (req, res) => {
     const password_hash = await bcrypt.hash(adminPassword, 10);
     const { data: newAdmin, error: adminCreateError } = await supabase.from('users').insert([{ mosque_id: newMosque.id, email: normalizedAdminEmail, password_hash, name: adminName, role: 'admin', is_temporary_password: false }]).select('id, email, name, role').single();
     if (adminCreateError) { 
-      await supabase.from('mosques').delete().eq('id', newMosque.id); // Rollback mosque creation
+      await supabase.from('mosques').delete().eq('id', newMosque.id); 
       throw adminCreateError; 
     }
     
-    // Stuur welkomstmail naar nieuwe admin van een nieuwe moskee
-    // Alleen als M365 voor DEZE moskee al geconfigureerd zou zijn (onwaarschijnlijk, maar voorbereid)
-    // Echter, m365_configured wordt false gezet, dus dit zal niet triggeren tenzij je het later update.
-    if (newAdmin && newMosque.m365_configured && newMosque.m365_sender_email) { // Extra check op sender_email
+    if (newAdmin && newMosque.m365_configured && newMosque.m365_sender_email) { 
         console.log(`[Mosque Register] New admin ${newAdmin.email} for mosque ${newMosque.name}. M365 configured, attempting admin welcome email.`);
         const adminWelcomeSubject = `Welkom als beheerder bij ${newMosque.name}!`;
         const adminWelcomeBody = `
@@ -462,14 +455,14 @@ createCrudEndpoints('students', '*, parent:parent_id(id, name, email, phone, amo
 createCrudEndpoints('payments', '*, parent:parent_id(id, name, email), student:student_id(id, name), processed_by_user:processed_by(name)');
 
 // ======================
-// SPECIFIC POST ROUTES (users is aangepast)
+// SPECIFIC POST ROUTES (users is aangepast voor dynamische link)
 // ======================
 app.post('/api/users', async (req, res) => {
   try {
     const { 
         mosque_id, email, name, role, phone, address, city, zipcode, 
         password: plainTextPassword, 
-        sendWelcomeEmail = true // Default naar true als het niet wordt meegegeven
+        sendWelcomeEmail = true 
     } = req.body;
     
     if (!mosque_id || !email || !name || !role || !plainTextPassword) return sendError(res, 400, "Verplichte velden (mosque_id, email, name, role, password) ontbreken.", null, req);
@@ -491,15 +484,35 @@ app.post('/api/users', async (req, res) => {
       console.log(`[POST /api/users] Parent user ${user.email} created. 'sendWelcomeEmail' is true. Attempting to send welcome email.`);
       
       let mosqueNameForEmail = 'uw moskee';
+      let mosqueSubdomain = ''; 
+      
       try {
-        const { data: mosqueDataLookup } = await supabase.from('mosques').select('name, m365_configured').eq('id', user.mosque_id).single();
-        if (mosqueDataLookup && mosqueDataLookup.name) {
-          mosqueNameForEmail = mosqueDataLookup.name;
+        const { data: mosqueDataLookup } = await supabase
+            .from('mosques')
+            .select('name, subdomain, m365_configured') 
+            .eq('id', user.mosque_id)
+            .single();
+            
+        if (mosqueDataLookup) {
+          if (mosqueDataLookup.name) mosqueNameForEmail = mosqueDataLookup.name;
+          if (mosqueDataLookup.subdomain) mosqueSubdomain = mosqueDataLookup.subdomain;
         }
+
         if (!mosqueDataLookup || !mosqueDataLookup.m365_configured) {
             console.warn(`[POST /api/users] M365 not configured for mosque ${user.mosque_id} (${mosqueNameForEmail}). Welcome email for ${user.email} will NOT be sent.`);
         } else {
             const emailSubject = `Welkom bij ${mosqueNameForEmail}! Uw account is aangemaakt.`;
+            let loginLink = `https://mijnlvs.nl`; // Default generic link
+            let emailTypeForLog = 'm365_parent_welcome_email_generic_link';
+
+            if (mosqueSubdomain) {
+                loginLink = `https://${mosqueSubdomain}.mijnlvs.nl`;
+                emailTypeForLog = 'm365_parent_welcome_email'; // Specific link type
+                console.log(`[POST /api/users] Using specific login link for ${user.email}: ${loginLink}`);
+            } else {
+                console.warn(`[POST /api/users] Subdomain not found for mosque ${user.mosque_id} (${mosqueNameForEmail}). Using generic login link for ${user.email}.`);
+            }
+            
             const emailBody = `
                 <!DOCTYPE html>
                 <html lang="nl">
@@ -513,7 +526,7 @@ app.post('/api/users', async (req, res) => {
                         <li><strong>Tijdelijk wachtwoord:</strong> ${plainTextPassword}</li>
                     </ul>
                     <p>Wij adviseren u dringend om uw wachtwoord direct na de eerste keer inloggen te wijzigen via uw profielpagina.</p>
-                    <p>U kunt inloggen via de website van uw moskee of via <a href="https://mijnlvs.nl">https://mijnlvs.nl</a>.</p>
+                    <p>U kunt inloggen via: <a href="${loginLink}">${loginLink}</a>.</p>
                     <br>
                     <p>Met vriendelijke groet,</p>
                     <p>Het bestuur van ${mosqueNameForEmail}</p>
@@ -526,7 +539,7 @@ app.post('/api/users', async (req, res) => {
                 subject: emailSubject,
                 body: emailBody,
                 mosqueId: user.mosque_id,
-                emailType: 'm365_parent_welcome_email'
+                emailType: emailTypeForLog
             }).then(emailResult => {
                 if (!emailResult.success) {
                   console.error(`[POST /api/users] ASYNC ERROR: Failed to send welcome email to ${user.email}. Error: ${emailResult.error}`, emailResult.details || '');
@@ -538,7 +551,7 @@ app.post('/api/users', async (req, res) => {
             });
         }
       } catch (mosqueLookupError) {
-          console.error(`[POST /api/users] ASYNC ERROR: Error looking up mosque name for welcome email to ${user.email}:`, mosqueLookupError.message);
+          console.error(`[POST /api/users] ASYNC ERROR: Error looking up mosque details for welcome email to ${user.email}:`, mosqueLookupError.message);
       }
     } else if (user && user.role === 'parent' && !sendWelcomeEmail) {
         console.log(`[POST /api/users] Parent user ${user.email} created, but 'sendWelcomeEmail' was false. No email sent.`);
@@ -611,7 +624,7 @@ app.post('/api/send-email-m365', async (req, res) => {
         let actualTenantId = explicitTenantId;
         let actualClientId = explicitClientId;
         let senderToUse = explicitSenderForTest;
-        let effectiveMosqueName = mosqueNameFromFrontend;
+        // let effectiveMosqueName = mosqueNameFromFrontend; // Niet direct nodig voor de call, meer voor logging
 
         if (mosqueId && (!actualTenantId || !actualClientId || !senderToUse)) {
             console.log(`[/api/send-email-m365 TEST] mosqueId ${mosqueId} provided, some explicit M365 params missing. Attempting DB lookup for missing parts.`);
@@ -628,7 +641,7 @@ app.post('/api/send-email-m365', async (req, res) => {
             if (!actualTenantId) actualTenantId = mData.m365_tenant_id;
             if (!actualClientId) actualClientId = mData.m365_client_id;
             if (!senderToUse) senderToUse = mData.m365_sender_email;
-            if (!effectiveMosqueName && mData.name) effectiveMosqueName = mData.name;
+            // if (!effectiveMosqueName && mData.name) effectiveMosqueName = mData.name;
         }
 
         if (!actualTenantId || !actualClientId || !clientSecretFromFrontend || !senderToUse) {
@@ -753,7 +766,7 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Moskee Backend API v2.2.3 (with welcome emails & internal M365 func) running on port ${PORT}`);
+  console.log(`🚀 Moskee Backend API v2.2.4 (with dynamic welcome email links) running on port ${PORT}`);
   console.log(`🔗 Base URL for API: (Your Railway public URL, e.g., https://project-name.up.railway.app)`);
   console.log(`🗄️ Supabase Project URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'Not configured'}`);
   if (process.env.NODE_ENV !== 'production') {
