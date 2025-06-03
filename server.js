@@ -76,7 +76,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    version: '2.2.4', // Versie update
+    version: '2.2.5', // Versie update: send new password endpoint
     supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
   });
 });
@@ -597,6 +597,118 @@ app.post('/api/payments', async (req, res) => {
   } catch (error) { sendError(res, 500, 'Fout bij aanmaken betaling.', error.message, req); }
 });
 
+
+// ==================================
+// NIEUWE WACHTWOORD E-MAIL ROUTE
+// ==================================
+app.post('/api/users/:userId/send-new-password', async (req, res) => {
+  const { userId } = req.params;
+  console.log(`[SEND NEW PWD] Request received for user ID: ${userId}`);
+
+  try {
+    // 1. Haal gebruiker en moskee info op
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, email, name, role, mosque_id, mosque:mosque_id (name, subdomain, m365_configured)') // Haal moskee info direct op
+      .eq('id', userId)
+      .single();
+
+    if (userError || !user) {
+      return sendError(res, 404, 'Gebruiker niet gevonden.', userError ? userError.message : 'Geen data', req);
+    }
+
+    // Controleer of alle benodigde moskee-informatie aanwezig is
+    if (!user.mosque || !user.mosque.name || !user.mosque.subdomain) {
+      console.error(`[SEND NEW PWD] Incomplete mosque data for user ${userId}:`, user.mosque);
+      return sendError(res, 500, 'Moskee informatie (naam/subdomein) ontbreekt voor deze gebruiker of kon niet worden geladen.', null, req);
+    }
+    
+    console.log(`[SEND NEW PWD] Found user: ${user.email}, Role: ${user.role}, Mosque: ${user.mosque.name} (Subdomain: ${user.mosque.subdomain}, M365 Configured: ${user.mosque.m365_configured})`);
+
+    // 2. Genereer nieuw tijdelijk wachtwoord
+    // Simpele generator, overweeg een sterkere library voor productie
+    const newTempPassword = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 4).toUpperCase() + '!';
+    const newPasswordHash = await bcrypt.hash(newTempPassword, 10);
+
+    // 3. Update gebruiker in database
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ 
+        password_hash: newPasswordHash, 
+        is_temporary_password: true,
+        updated_at: new Date() 
+      })
+      .eq('id', userId);
+
+    if (updateError) {
+      console.error(`[SEND NEW PWD] Error updating password for user ${userId}:`, updateError.message);
+      return sendError(res, 500, 'Kon wachtwoord niet updaten in database.', updateError.message, req);
+    }
+    console.log(`[SEND NEW PWD] Password updated in DB for user ${userId}. New temp password: ${newTempPassword}`); // Log voor debugging
+
+    // 4. Stuur e-mail (alleen als M365 geconfigureerd is voor de moskee)
+    if (!user.mosque.m365_configured) {
+        console.warn(`[SEND NEW PWD] M365 not configured for mosque ${user.mosque.name}. Password updated, but no email sent for user ${user.email}.`);
+        return res.json({ 
+            success: true, 
+            message: `Wachtwoord succesvol gereset voor ${user.name}. M365 is niet geconfigureerd voor deze moskee, dus er is GEEN e-mail verzonden. Het nieuwe tijdelijke wachtwoord is: ${newTempPassword}`,
+            newPasswordForManualDelivery: newTempPassword 
+        });
+    }
+    
+    const mosqueName = user.mosque.name;
+    const mosqueSubdomain = user.mosque.subdomain;
+    const loginLink = `https://${mosqueSubdomain}.mijnlvs.nl`;
+
+    const emailSubject = `Nieuw wachtwoord voor uw ${mosqueName} account`;
+    const emailBody = `
+        <!DOCTYPE html>
+        <html lang="nl">
+        <head><meta charset="UTF-8"><title>${emailSubject}</title></head>
+        <body>
+            <p>Beste ${user.name},</p>
+            <p>Op uw verzoek (of dat van een beheerder) is er een nieuw tijdelijk wachtwoord ingesteld voor uw account bij ${mosqueName}.</p>
+            <p>U kunt nu inloggen met de volgende gegevens:</p>
+            <ul>
+                <li><strong>E-mailadres:</strong> ${user.email}</li>
+                <li><strong>Nieuw tijdelijk wachtwoord:</strong> ${newTempPassword}</li>
+            </ul>
+            <p>Wij adviseren u dringend om uw wachtwoord direct na de eerste keer inloggen te wijzigen via uw profielpagina.</p>
+            <p>U kunt inloggen via: <a href="${loginLink}">${loginLink}</a>.</p>
+            <br>
+            <p>Met vriendelijke groet,</p>
+            <p>Het bestuur van ${mosqueName}</p>
+        </body>
+        </html>
+    `;
+
+    const emailResult = await sendM365EmailInternal({
+        to: user.email,
+        subject: emailSubject,
+        body: emailBody,
+        mosqueId: user.mosque_id,
+        emailType: `m365_new_temp_password_${user.role}` 
+    });
+
+    if (emailResult.success) {
+        console.log(`[SEND NEW PWD] New password email successfully sent to ${user.email}.`);
+        res.json({ success: true, message: `Nieuw tijdelijk wachtwoord succesvol verzonden naar ${user.name} (${user.email}).` });
+    } else {
+        console.error(`[SEND NEW PWD] Failed to send new password email to ${user.email}: ${emailResult.error}`, emailResult.details);
+        return res.status(500).json({ // Stuur een 500 status voor duidelijkheid
+            success: false, 
+            error: `Wachtwoord wel gereset, maar e-mail kon niet worden verzonden: ${emailResult.error || 'Onbekende e-mailfout'}. Het nieuwe tijdelijke wachtwoord is: ${newTempPassword}`, 
+            details: { newPasswordForManualDelivery: newTempPassword }
+        });
+    }
+
+  } catch (error) {
+    console.error(`[SEND NEW PWD] Unexpected error for user ID ${userId}:`, error);
+    sendError(res, 500, 'Onverwachte serverfout bij het versturen van een nieuw wachtwoord.', error.message, req);
+  }
+});
+
+
 // EMAIL & CONFIG ROUTES (send-email-m365 is aangepast)
 // =========================================================================================
 app.post('/api/send-email-m365', async (req, res) => {
@@ -618,13 +730,12 @@ app.post('/api/send-email-m365', async (req, res) => {
     return sendError(res, 400, 'M365 email (route): To, Subject, and Body zijn verplicht.', null, req);
   }
 
-  if (clientSecretFromFrontend) {
+  if (clientSecretFromFrontend) { // Test-scenario met expliciete credentials
     console.log("[/api/send-email-m365] Handling as EXPLICIT TEST call (clientSecret provided).");
     try {
         let actualTenantId = explicitTenantId;
         let actualClientId = explicitClientId;
         let senderToUse = explicitSenderForTest;
-        // let effectiveMosqueName = mosqueNameFromFrontend; // Niet direct nodig voor de call, meer voor logging
 
         if (mosqueId && (!actualTenantId || !actualClientId || !senderToUse)) {
             console.log(`[/api/send-email-m365 TEST] mosqueId ${mosqueId} provided, some explicit M365 params missing. Attempting DB lookup for missing parts.`);
@@ -641,7 +752,6 @@ app.post('/api/send-email-m365', async (req, res) => {
             if (!actualTenantId) actualTenantId = mData.m365_tenant_id;
             if (!actualClientId) actualClientId = mData.m365_client_id;
             if (!senderToUse) senderToUse = mData.m365_sender_email;
-            // if (!effectiveMosqueName && mData.name) effectiveMosqueName = mData.name;
         }
 
         if (!actualTenantId || !actualClientId || !clientSecretFromFrontend || !senderToUse) {
@@ -707,7 +817,7 @@ app.post('/api/send-email-m365', async (req, res) => {
         sendError(res, statusCode, errMsg, errorDetails, req);
     }
 
-  } else if (mosqueId) {
+  } else if (mosqueId) { // App-geïnitieerde e-mail, gebruik interne functie die DB credentials haalt
     console.log(`[/api/send-email-m365] Handling as APP-INITIATED email for mosque ${mosqueId}. Using internal function.`);
     const result = await sendM365EmailInternal({ 
         to, 
@@ -747,7 +857,7 @@ app.use('*', (req, res) => {
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
       'GET /api/mosque/:subdomain', 'PUT /api/mosques/:mosqueId',
       'PUT /api/mosques/:mosqueId/m365-settings', 'PUT /api/mosques/:mosqueId/contribution-settings',
-      'GET /api/mosques/:mosqueId/users', 'GET /api/users/:id', 'POST /api/users', 'PUT /api/users/:id', 'DELETE /api/users/:id',
+      'GET /api/mosques/:mosqueId/users', 'GET /api/users/:id', 'POST /api/users', 'PUT /api/users/:id', 'DELETE /api/users/:id', 'POST /api/users/:userId/send-new-password',
       'GET /api/mosques/:mosqueId/classes','GET /api/classes/:id', 'POST /api/classes', 'PUT /api/classes/:id', 'DELETE /api/classes/:id',
       'GET /api/mosques/:mosqueId/students','GET /api/students/:id', 'POST /api/students', 'PUT /api/students/:id', 'DELETE /api/students/:id',
       'GET /api/mosques/:mosqueId/payments','GET /api/payments/:id', 'POST /api/payments', 'PUT /api/payments/:id', 'DELETE /api/payments/:id',
@@ -766,7 +876,7 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Moskee Backend API v2.2.4 (with dynamic welcome email links) running on port ${PORT}`);
+  console.log(`🚀 Moskee Backend API v2.2.5 (with send new password endpoint) running on port ${PORT}`);
   console.log(`🔗 Base URL for API: (Your Railway public URL, e.g., https://project-name.up.railway.app)`);
   console.log(`🗄️ Supabase Project URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'Not configured'}`);
   if (process.env.NODE_ENV !== 'production') {
