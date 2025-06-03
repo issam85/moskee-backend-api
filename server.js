@@ -1,8 +1,8 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.1.2 - Railway + Supabase Compatible + CRUD + Extra Init Log & Simpele DB Test
+// Versie: 2.2.0 - Railway + Supabase Compatible + CRUD + Configureerbare Staffel (All-Inclusive)
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios'); // Voor M365 email
+const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const bcrypt = require('bcrypt');
 
@@ -15,47 +15,33 @@ const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
 console.log("🚦 [INIT] Attempting to initialize Supabase client...");
 console.log("🚦 [INIT] Using SUPABASE_URL:", supabaseUrl);
-console.log("🚦 [INIT] Using SUPABASE_SERVICE_KEY (length):", supabaseKey ? supabaseKey.length : "NOT SET", supabaseKey ? `(starts with: ${supabaseKey.substring(0,10)}...)` : ''); // Log eerste 10 chars
+console.log("🚦 [INIT] Using SUPABASE_SERVICE_KEY (length):", supabaseKey ? supabaseKey.length : "NOT SET", supabaseKey ? `(starts with: ${supabaseKey.substring(0,10)}...)` : '');
 
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ FATAL: SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables are required.");
   process.exit(1);
 }
-
 let supabase;
 try {
   supabase = createClient(supabaseUrl, supabaseKey);
-  console.log("✅ [INIT] Supabase client initialized successfully (or at least, createClient did not throw an immediate error).");
+  console.log("✅ [INIT] Supabase client initialized successfully.");
 } catch (initError) {
-  console.error("❌ FATAL: Supabase client initialization FAILED:", initError.message);
-  console.error("Full initialization error object:", initError);
+  console.error("❌ FATAL: Supabase client initialization FAILED:", initError.message, initError);
   process.exit(1);
 }
 
-// DIRECTE CONNECTIVITEITSTEST (draait bij server start)
 async function testSupabaseConnection() {
   console.log("🚦 [DB STARTUP TEST] Attempting a simple query to Supabase...");
   try {
-    const { data, error, count } = await supabase
-      .from('mosques')
-      .select('id', { count: 'exact' })
-      .limit(1);
-
-    if (error) {
-      console.error("❌ [DB STARTUP TEST] Supabase query FAILED. Error object:", JSON.stringify(error, null, 2));
-    } else {
-      console.log(`✅ [DB STARTUP TEST] Supabase query SUCCEEDED. Found ${count === null ? 'unknown (check RLS/permissions)' : count} mosque(s). Sample data (limit 1):`, data);
-      if ((count === 0 || (data && data.length === 0)) && count !== null) {
-          console.warn("⚠️ [DB STARTUP TEST] Query succeeded but no mosques found. Ensure your 'mosques' table has data and service_role has access.");
-      }
+    const { data, error, count } = await supabase.from('mosques').select('id', { count: 'exact' }).limit(1);
+    if (error) console.error("❌ [DB STARTUP TEST] Supabase query FAILED. Error object:", JSON.stringify(error, null, 2));
+    else {
+      console.log(`✅ [DB STARTUP TEST] Supabase query SUCCEEDED. Found ${count === null ? 'unknown (check RLS/permissions)' : count} mosque(s). Sample data:`, data);
+      if ((count === 0 || (data && data.length === 0)) && count !== null) console.warn("⚠️ [DB STARTUP TEST] No mosques found. Ensure 'mosques' table has data and service_role has access.");
     }
-  } catch (e) {
-    console.error("❌ [DB STARTUP TEST] Supabase query FAILED (outer catch block):", e.message);
-    console.error("Full error object from outer catch:", e);
-  }
+  } catch (e) { console.error("❌ [DB STARTUP TEST] Supabase query FAILED (outer catch):", e.message, e); }
 }
 testSupabaseConnection();
-// EINDE DIRECTE CONNECTIVITEITSTEST
 
 // Middleware
 app.use(cors({
@@ -83,7 +69,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    version: '2.1.2',
+    version: '2.2.0', // Versie update
     supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
   });
 });
@@ -133,15 +119,17 @@ app.post('/api/mosques/register', async (req, res) => {
     const { data: existingAdmin } = await supabase.from('users').select('id').eq('email', normalizedAdminEmail).maybeSingle();
     if (existingAdmin) return sendError(res, 409, 'Dit emailadres is al geregistreerd.', null, req);
 
-    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{ name: mosqueName, subdomain: normalizedSubdomain, address, city, zipcode, phone, email: mosqueContactEmail || normalizedAdminEmail, website, m365_sender_email: null, m365_configured: false }]).select().single();
+    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{
+        name: mosqueName, subdomain: normalizedSubdomain, address, city, zipcode, phone,
+        email: mosqueContactEmail || normalizedAdminEmail, website, m365_configured: false,
+        contribution_1_child: 150, contribution_2_children: 300, contribution_3_children: 450,
+        contribution_4_children: 450, contribution_5_plus_children: 450,
+    }]).select().single();
     if (mosqueCreateError) throw mosqueCreateError;
 
     const password_hash = await bcrypt.hash(adminPassword, 10);
     const { data: newAdmin, error: adminCreateError } = await supabase.from('users').insert([{ mosque_id: newMosque.id, email: normalizedAdminEmail, password_hash, name: adminName, role: 'admin', is_temporary_password: false }]).select('id, email, name, role').single();
-    if (adminCreateError) {
-      await supabase.from('mosques').delete().eq('id', newMosque.id);
-      throw adminCreateError;
-    }
+    if (adminCreateError) { await supabase.from('mosques').delete().eq('id', newMosque.id); throw adminCreateError; }
     res.status(201).json({ success: true, message: 'Registratie succesvol!', mosque: newMosque, admin: newAdmin });
   } catch (error) {
     sendError(res, error.code === '23505' ? 409 : (error.status || 400), error.message || 'Fout bij registratie.', error.details || error.hint || error, req);
@@ -154,6 +142,7 @@ app.post('/api/mosques/register', async (req, res) => {
 app.get('/api/mosque/:subdomain', async (req, res) => {
   try {
     const { subdomain } = req.params;
+    // Selecteer alle kolommen, inclusief de nieuwe contribution_ velden
     const { data: mosque, error } = await supabase.from('mosques').select('*').eq('subdomain', subdomain.toLowerCase().trim()).single();
     if (error || !mosque) return sendError(res, 404, 'Moskee niet gevonden.', null, req);
     res.json(mosque);
@@ -165,9 +154,14 @@ app.get('/api/mosque/:subdomain', async (req, res) => {
 app.put('/api/mosques/:mosqueId', async (req, res) => {
     try {
         const { mosqueId } = req.params;
+        // Haal alle mogelijke velden op die geüpdatet kunnen worden voor basisinfo
         const { name, address, city, zipcode, phone, email, website } = req.body;
         if (!name) return sendError(res, 400, "Moskeenaam is verplicht.", null, req);
-        const { data, error } = await supabase.from('mosques').update({ name, address, city, zipcode, phone, email, website, updated_at: new Date() }).eq('id', mosqueId).select().single();
+        const updatePayload = { name, address, city, zipcode, phone, email, website, updated_at: new Date() };
+        // Verwijder undefined keys om te voorkomen dat je nulls naar de DB stuurt waar je dat niet wilt
+        Object.keys(updatePayload).forEach(key => updatePayload[key] === undefined && delete updatePayload[key]);
+
+        const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId).select().single();
         if (error) throw error;
         res.json({ success: true, message: "Moskeegegevens bijgewerkt.", data });
     } catch (error) {
@@ -181,7 +175,7 @@ app.put('/api/mosques/:mosqueId/m365-settings', async (req, res) => {
         const { m365_tenant_id, m365_client_id, m365_client_secret, m365_sender_email, m365_configured } = req.body;
         const updatePayload = { m365_tenant_id, m365_client_id, m365_sender_email, m365_configured: !!m365_configured, updated_at: new Date() };
         if (m365_client_secret && m365_client_secret.trim() !== '') {
-            updatePayload.m365_client_secret = m365_client_secret;
+            updatePayload.m365_client_secret = m365_client_secret; // Onthoud: encrypteren in productie!
         }
         const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId).select('id, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured').single();
         if (error) throw error;
@@ -190,6 +184,45 @@ app.put('/api/mosques/:mosqueId/m365-settings', async (req, res) => {
         sendError(res, 500, "Fout bij bijwerken M365 instellingen.", error.message, req);
     }
 });
+
+app.put('/api/mosques/:mosqueId/contribution-settings', async (req, res) => {
+    try {
+        const { mosqueId } = req.params;
+        const { contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children } = req.body;
+        const contributions = [contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children];
+        for (const amount of contributions) {
+            if (amount !== undefined && amount !== null && (isNaN(parseFloat(amount)) || parseFloat(amount) < 0)) return sendError(res, 400, "Alle bijdragebedragen moeten geldige, niet-negatieve getallen zijn.", null, req);
+        }
+        const updatePayload = {
+            contribution_1_child: contribution_1_child !== undefined ? parseFloat(contribution_1_child) : null,
+            contribution_2_children: contribution_2_children !== undefined ? parseFloat(contribution_2_children) : null,
+            contribution_3_children: contribution_3_children !== undefined ? parseFloat(contribution_3_children) : null,
+            contribution_4_children: contribution_4_children !== undefined ? parseFloat(contribution_4_children) : null,
+            contribution_5_plus_children: contribution_5_plus_children !== undefined ? parseFloat(contribution_5_plus_children) : null,
+            updated_at: new Date()
+        };
+        const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId)
+            .select('id, contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children').single();
+        if (error) throw error;
+        res.json({ success: true, message: "Instellingen voor bijdrage succesvol opgeslagen.", data });
+    } catch (error) {
+        sendError(res, 500, "Fout bij opslaan bijdrage-instellingen.", error.message, req);
+    }
+});
+
+// Helper functie voor het berekenen van amount_due gebaseerd op staffel
+const calculateAmountDueFromStaffel = (childCount, mosqueSettings) => {
+    if (!mosqueSettings) {
+        console.warn("[WARN] calculateAmountDueFromStaffel: mosqueSettings is undefined, using hardcoded fallbacks (150/kind, max 450).");
+        return Math.min(childCount * 150, 450);
+    }
+    if (childCount <= 0) return 0;
+    if (childCount === 1) return parseFloat(mosqueSettings.contribution_1_child ?? 150);
+    if (childCount === 2) return parseFloat(mosqueSettings.contribution_2_children ?? 300);
+    if (childCount === 3) return parseFloat(mosqueSettings.contribution_3_children ?? 450);
+    if (childCount === 4) return parseFloat(mosqueSettings.contribution_4_children ?? 450);
+    return parseFloat(mosqueSettings.contribution_5_plus_children ?? 450);
+};
 
 // ======================
 // GENERIC CRUD HELPER & ENDPOINTS
@@ -229,6 +262,10 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
                 delete updateData.password;
                 updateData.is_temporary_password = false;
             } else if (tableName === 'users') { delete updateData.password_hash; }
+            // Voorkom dat amount_due direct via user update wordt gewijzigd voor ouders
+            if (tableName === 'users' && req.body.role === 'parent') { // Check role uit originele body, niet updateData
+                 delete updateData.amount_due;
+            }
             const { data, error } = await supabase.from(tableName).update(updateData).eq('id', id).select(selectString).single();
             if (error) throw error;
             res.json({ success: true, message: `${singularName} bijgewerkt.`, [singularName]: data });
@@ -239,13 +276,15 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
         try {
             const { id } = req.params;
             if (tableName === 'students') {
-                const { data: studentToDelete } = await supabase.from('students').select('parent_id').eq('id', id).single();
+                const { data: studentToDelete, error: studentFetchError } = await supabase.from('students').select('parent_id, mosque_id').eq('id', id).single();
+                if (studentFetchError || !studentToDelete) return sendError(res, 404, "Leerling niet gevonden.", null, req);
                 const { error: deleteError } = await supabase.from(tableName).delete().eq('id', id);
                 if (deleteError) throw deleteError;
-                if (studentToDelete && studentToDelete.parent_id) {
-                    const { data: siblings, count: siblingCount } = await supabase.from('students').select('id', { count: 'exact' }).eq('parent_id', studentToDelete.parent_id).eq('active', true);
-                    const amountDue = Math.min(siblingCount * 150, 450);
-                    await supabase.from('users').update({ amount_due: amountDue }).eq('id', studentToDelete.parent_id);
+                if (studentToDelete.parent_id && studentToDelete.mosque_id) {
+                    const { data: mosqueSettings } = await supabase.from('mosques').select('contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children').eq('id', studentToDelete.mosque_id).single();
+                    const { count: siblingCount } = await supabase.from('students').select('id', { count: 'exact' }).eq('parent_id', studentToDelete.parent_id).eq('active', true);
+                    const newAmountDue = calculateAmountDueFromStaffel(siblingCount || 0, mosqueSettings);
+                    await supabase.from('users').update({ amount_due: newAmountDue }).eq('id', studentToDelete.parent_id);
                 }
             } else {
                  const { error } = await supabase.from(tableName).delete().eq('id', id);
@@ -258,18 +297,18 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
 
 createCrudEndpoints('users', 'id, mosque_id, email, name, role, phone, address, city, zipcode, amount_due, created_at');
 createCrudEndpoints('classes', '*, teacher:teacher_id(id, name), students(count)');
-createCrudEndpoints('students', '*, parent:parent_id(id, name, email, phone), class:class_id(id, name, teacher_id, teacher:teacher_id(name))');
+createCrudEndpoints('students', '*, parent:parent_id(id, name, email, phone, amount_due), class:class_id(id, name, teacher_id, teacher:teacher_id(name))');
 createCrudEndpoints('payments', '*, parent:parent_id(id, name, email), student:student_id(id, name), processed_by_user:processed_by(name)');
 
 // ======================
-// SPECIFIC POST ROUTES (voor creatie met unieke logica)
+// SPECIFIC POST ROUTES
 // ======================
 app.post('/api/users', async (req, res) => {
   try {
-    const { mosque_id, email, name, role, phone, address, city, zipcode, password, amount_due } = req.body;
+    const { mosque_id, email, name, role, phone, address, city, zipcode, password /* amount_due wordt hier niet meer verwacht */ } = req.body;
     if (!mosque_id || !email || !name || !role || !password) return sendError(res, 400, "Mosque ID, email, name, role, and password zijn verplicht.", null, req);
     const password_hash = await bcrypt.hash(password, 10);
-    const userData = { mosque_id, email: email.toLowerCase().trim(), password_hash, name, role, is_temporary_password: true, phone, address, city, zipcode, amount_due: role === 'parent' ? (parseFloat(amount_due) || 0) : null };
+    const userData = { mosque_id, email: email.toLowerCase().trim(), password_hash, name, role, is_temporary_password: true, phone, address, city, zipcode, amount_due: role === 'parent' ? 0 : null };
     const { data: user, error } = await supabase.from('users').insert([userData]).select('id, email, name, role, phone, address, city, zipcode, amount_due, created_at, mosque_id').single();
     if (error) throw error;
     res.status(201).json({ success: true, user });
@@ -289,11 +328,13 @@ app.post('/api/classes', async (req, res) => {
 app.post('/api/students', async (req, res) => {
   try {
     const { mosque_id, parent_id, class_id, name, date_of_birth, emergency_contact, emergency_phone, notes } = req.body;
-    if (!mosque_id || !parent_id || !class_id || !name) return sendError(res, 400, "Mosque ID, parent ID, class ID, and student name zijn verplicht.", null, req);
+    if (!mosque_id || !parent_id || !class_id || !name) return sendError(res, 400, "Verplichte velden voor student ontbreken.", null, req);
     const { data: student, error } = await supabase.from('students').insert([{ mosque_id, parent_id, class_id, name, date_of_birth, emergency_contact, emergency_phone, notes }]).select().single();
     if (error) throw error;
-    const { data: siblings, count: siblingCount } = await supabase.from('students').select('id', { count: 'exact' }).eq('parent_id', parent_id).eq('active', true);
-    const newAmountDue = Math.min(siblingCount * 150, 450);
+    const { data: mosqueSettings } = await supabase.from('mosques').select('contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children').eq('id', mosque_id).single();
+    if (!mosqueSettings) console.warn(`[WARN] Geen staffel instellingen voor moskee ${mosque_id}. Amount_due wordt mogelijk niet correct berekend.`);
+    const { count: siblingCount } = await supabase.from('students').select('id', { count: 'exact' }).eq('parent_id', parent_id).eq('active', true);
+    const newAmountDue = calculateAmountDueFromStaffel(siblingCount || 0, mosqueSettings);
     await supabase.from('users').update({ amount_due: newAmountDue }).eq('id', parent_id);
     res.status(201).json({ success: true, student });
   } catch (error) { sendError(res, 500, 'Fout bij aanmaken leerling.', error.message, req); }
@@ -318,25 +359,31 @@ app.post('/api/send-email-m365', async (req, res) => {
     if (!tenantId || !clientId || !clientSecret || !to || !subject || !body) return sendError(res, 400, 'M365 email: Vereiste velden ontbreken.', null, req);
     const tokenResponse = await axios.post( `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, new URLSearchParams({ client_id: clientId, client_secret: clientSecret, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials'}), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     const accessToken = tokenResponse.data.access_token;
-    let senderToUse = process.env.M365_SENDER_EMAIL || 'fallback@example.com';
+    let senderToUse = process.env.M365_SENDER_EMAIL || 'fallback_sender@example.com'; // Gebruik een neutrale fallback
     if (mosqueName) {
-        const { data: mosqueFromDb } = await supabase.from('mosques').select('m365_sender_email').eq('name', mosqueName).single(); // Of zoek op ID als je die hebt
+        const { data: mosqueFromDb } = await supabase.from('mosques').select('m365_sender_email').eq('name', mosqueName).single();
         if (mosqueFromDb && mosqueFromDb.m365_sender_email) senderToUse = mosqueFromDb.m365_sender_email;
+        else console.warn(`[M365 Email] Geen m365_sender_email gevonden voor moskee "${mosqueName}", gebruik fallback: ${senderToUse}`);
+    } else {
+        console.warn(`[M365 Email] Geen mosqueName meegegeven, gebruik default fallback sender: ${senderToUse}`);
     }
-    console.log(`📤 Sending email from: ${senderToUse} to: ${to} via Microsoft Graph...`);
+    console.log(`📤 Sending M365 email from: ${senderToUse} to: ${to}...`);
     const emailResponse = await axios.post( `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`, { message: { subject, body: { contentType: 'Text', content: body }, toRecipients: [{ emailAddress: { address: to } }] } }, { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } });
-    if (mosqueName) { /* ... logging code ... */ } // Houd je email logging code
+    // Log email
+    if (mosqueName) {
+      const { data: mosque } = await supabase.from('mosques').select('id').eq('name', mosqueName).single();
+      if (mosque) {
+        await supabase.from('email_logs').insert([{ mosque_id: mosque.id, recipient_email: to, subject, body, email_type: 'api_triggered', sent_status: 'sent', microsoft_message_id: emailResponse.headers['request-id'], sent_at: new Date() }]);
+      }
+    }
     res.json({ success: true, messageId: emailResponse.headers['request-id'] || 'sent_' + Date.now(), service: 'Microsoft Graph API', sender: senderToUse });
   } catch (error) { sendError(res, 500, `M365 email send error: ${error.response?.data?.error?.message || error.message}`, error.response?.data, req); }
 });
 
 app.get('/api/config-check', (req, res) => {
   res.json({
-    hasSupabaseUrl: !!process.env.SUPABASE_URL,
-    hasSupabaseKey: !!process.env.SUPABASE_SERVICE_KEY,
-    defaultM365Sender: process.env.M365_SENDER_EMAIL || 'Not Set in Env',
-    nodeEnv: process.env.NODE_ENV || 'development',
-    port: PORT
+    hasSupabaseUrl: !!process.env.SUPABASE_URL, hasSupabaseKey: !!process.env.SUPABASE_SERVICE_KEY,
+    defaultM365Sender: process.env.M365_SENDER_EMAIL || 'Not Set in Env', nodeEnv: process.env.NODE_ENV || 'development', port: PORT
   });
 });
 
@@ -344,7 +391,8 @@ app.get('/api/config-check', (req, res) => {
 app.use('*', (req, res) => {
   sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
-      'GET /api/mosque/:subdomain', 'PUT /api/mosques/:mosqueId', 'PUT /api/mosques/:mosqueId/m365-settings',
+      'GET /api/mosque/:subdomain', 'PUT /api/mosques/:mosqueId', 
+      'PUT /api/mosques/:mosqueId/m365-settings', 'PUT /api/mosques/:mosqueId/contribution-settings', // Nieuwe route toegevoegd
       'GET /api/mosques/:mosqueId/users', 'GET /api/users/:id', 'POST /api/users', 'PUT /api/users/:id', 'DELETE /api/users/:id',
       'GET /api/mosques/:mosqueId/classes','GET /api/classes/:id', 'POST /api/classes', 'PUT /api/classes/:id', 'DELETE /api/classes/:id',
       'GET /api/mosques/:mosqueId/students','GET /api/students/:id', 'POST /api/students', 'PUT /api/students/:id', 'DELETE /api/students/:id',
@@ -364,7 +412,7 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Moskee Backend API v2.1.2 running on port ${PORT}`);
+  console.log(`🚀 Moskee Backend API v2.2.0 running on port ${PORT}`);
   console.log(`🔗 Base URL for API: (Your Railway public URL)`);
   console.log(`🗄️ Supabase Project URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'Not configured'}`);
   if (process.env.NODE_ENV !== 'production') {
