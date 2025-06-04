@@ -1,5 +1,7 @@
 // server.js - Complete backend met Supabase database integratie
 // Versie: 2.2.8 - Productieklare Authenticatie + Les & Absentie (of je huidige versie)
+const fetch = require('node-fetch');
+globalThis.fetch = fetch;
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
