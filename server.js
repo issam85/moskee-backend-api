@@ -66,6 +66,25 @@ app.use(cors({
 }));
 app.use(express.json());
 
+app.get('/api/debug-supabase-client', (req, res) => {
+    let adminFunctionsAvailable = false;
+    let getUserByEmailType = 'undefined';
+    let listUsersType = 'undefined';
+
+    if (supabase && supabase.auth && supabase.auth.admin) {
+        adminFunctionsAvailable = true;
+        getUserByEmailType = typeof supabase.auth.admin.getUserByEmail;
+        listUsersType = typeof supabase.auth.admin.listUsers;
+    }
+    res.json({
+        message: "Supabase client debug info",
+        supabaseClientExists: !!supabase,
+        authAdminExists: adminFunctionsAvailable,
+        typeOfGetUserByEmail: getUserByEmailType,
+        typeOfListUsers: listUsersType,
+        actualSupabaseKeyUsedStart: supabaseKey ? supabaseKey.substring(0, 10) + "..." + supabaseKey.substring(supabaseKey.length - 5) : "KEY_NOT_SET_OR_EMPTY"
+    });
+});
 
 // ==================================
 // AUTHENTICATIE MIDDLEWARE (PRODUCTIE)
