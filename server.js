@@ -1,5 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.2.7 - Les & Absentie Management
+// Versie: 2.2.8 - Productieklare Authenticatie + Les & Absentie
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3001;
 
 // Supabase initialization
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY; 
 
 console.log("🚦 [INIT] Attempting to initialize Supabase client...");
 console.log("🚦 [INIT] Using SUPABASE_URL:", supabaseUrl);
@@ -24,7 +24,7 @@ if (!supabaseUrl || !supabaseKey) {
 let supabase;
 try {
   supabase = createClient(supabaseUrl, supabaseKey);
-  console.log("✅ [INIT] Supabase client initialized successfully.");
+  console.log("✅ [INIT] Supabase client initialized successfully (with service_role privileges).");
 } catch (initError) {
   console.error("❌ FATAL: Supabase client initialization FAILED:", initError.message, initError);
   process.exit(1);
@@ -119,7 +119,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    version: '2.2.6', // Versie update: Les & Absentie Management
+    version: '2.2.7', 
     supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
   });
 });
@@ -244,7 +244,7 @@ async function sendM365EmailInternal(emailDetails) {
 // =========================================================================================
 
 // ======================
-// AUTHENTICATION ROUTES (JOUW CODE)
+// AUTHENTICATION ROUTES (AANGEPAST voor Supabase Auth)
 // ======================
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -254,45 +254,19 @@ app.post('/api/auth/login', async (req, res) => {
     const normalizedEmail = email.toLowerCase().trim();
     const { data: mosque, error: mosqueError } = await supabase.from('mosques').select('id').eq('subdomain', normalizedSubdomain).single();
     if (mosqueError || !mosque) return sendError(res, 404, `Moskee met subdomein '${normalizedSubdomain}' niet gevonden.`, null, req);
-    
-    const { data: { user: supabaseAuthUser, session }, error: signInError } = await supabase.auth.signInWithPassword({
-      email: normalizedEmail,
-      password: password,
-    });
-
-    if (signInError) {
-        if (signInError.message === 'Invalid login credentials') return sendError(res, 401, 'Ongeldige combinatie van email/wachtwoord.', null, req);
-        return sendError(res, 401, `Authenticatiefout: ${signInError.message}`, null, req);
-    }
-    if (!supabaseAuthUser || !session) { 
-        return sendError(res, 401, 'Ongeldige inlogpoging, geen gebruiker of sessie ontvangen.', null, req);
-    }
-
-    const { data: appUser, error: appUserError } = await supabase
-        .from('users')
-        .select('*') 
-        .eq('id', supabaseAuthUser.id) 
-        .eq('mosque_id', mosque.id) 
-        .single();
-
-    if (appUserError || !appUser) { 
-        await supabase.auth.signOut(); 
-        return sendError(res, 401, 'Gebruiker gevonden in authenticatiesysteem, maar niet in applicatiedatabase voor deze moskee of gegevens inconsistent.', null, req); 
-    }
-
+    const { data: { user: supabaseAuthUser, session }, error: signInError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password: password });
+    if (signInError) { if (signInError.message === 'Invalid login credentials') return sendError(res, 401, 'Ongeldige combinatie van email/wachtwoord.', null, req); return sendError(res, 401, `Authenticatiefout: ${signInError.message}`, null, req); }
+    if (!supabaseAuthUser || !session) return sendError(res, 401, 'Ongeldige inlogpoging, geen gebruiker of sessie ontvangen.', null, req);
+    const { data: appUser, error: appUserError } = await supabase.from('users').select('*').eq('id', supabaseAuthUser.id).eq('mosque_id', mosque.id).single();
+    if (appUserError || !appUser) { await supabase.auth.signOut(); return sendError(res, 401, 'Gebruiker gevonden in authenticatiesysteem, maar niet in applicatiedatabase voor deze moskee of gegevens inconsistent.', null, req); }
     await supabase.from('users').update({ last_login: new Date() }).eq('id', appUser.id);
     const { password_hash, ...userWithoutPassword } = appUser; 
-    
     res.json({ success: true, user: userWithoutPassword });
-
-  } catch (error) { 
-    console.error("Login error (outer catch):", error); 
-    sendError(res, 500, 'Interne serverfout tijdens login.', error.message, req); 
-  }
+  } catch (error) { console.error("Login error (outer catch):", error); sendError(res, 500, 'Interne serverfout tijdens login.', error.message, req); }
 });
 
 // ======================
-// REGISTRATION ROUTE (JOUW CODE)
+// REGISTRATION ROUTE (AANGEPAST voor Supabase Auth)
 // ======================
 app.post('/api/mosques/register', async (req, res) => {
   try {
