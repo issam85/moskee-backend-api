@@ -1,7 +1,23 @@
 // server.js - Complete backend met Supabase database integratie
 // Versie: 2.2.8 - Productieklare Authenticatie + Les & Absentie (of je huidige versie)
-const fetch = require('node-fetch');
-globalThis.fetch = fetch;
+const fetch = require('node-fetch'); // Direct 'fetch' gebruiken
+// ...
+// Polyfill global.fetch als het nog niet bestaat, VOORDAT Supabase client wordt gemaakt
+if (typeof globalThis.fetch === 'undefined') {
+  globalThis.fetch = fetch;
+  // Als node-fetch v2 de Headers etc. niet direct op het 'fetch' object zet:
+  if (fetch.default) { // Sommige v2 setups via require doen dit
+      globalThis.Headers = fetch.default.Headers;
+      globalThis.Request = fetch.default.Request;
+      globalThis.Response = fetch.default.Response;
+  } else if (fetch.Headers) { // Andere v2 setups
+      globalThis.Headers = fetch.Headers;
+      globalThis.Request = fetch.Request;
+      globalThis.Response = fetch.Response;
+  }
+  console.log("Polyfilled globalThis.fetch with node-fetch v2.");
+}
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
