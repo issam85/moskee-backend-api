@@ -11,7 +11,7 @@
   },
   "keywords": [
     "mosque",
-    "education", 
+    "education",
     "management",
     "students",
     "al-hijra"
@@ -19,11 +19,11 @@
   "author": "Al-Hijra Moskee",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
+    "@supabase/supabase-js": "^2.49.10",
     "axios": "^1.6.2",
-    "@supabase/supabase-js": "^2.39.0",
-    "bcrypt": "^5.1.1"
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
   },
   "engines": {
     "node": ">=18.0.0",
