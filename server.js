@@ -269,6 +269,7 @@ app.post('/api/auth/login', async (req, res) => {
 // REGISTRATION ROUTE (AANGEPAST voor Supabase Auth)
 // ======================
 app.post('/api/mosques/register', async (req, res) => {
+  console.log("[BACKEND /api/mosques/register] Received req.body:", JSON.stringify(req.body, null, 2));
   try {
     const { mosqueName, subdomain, adminName, adminEmail, adminPassword, address, city, zipcode, phone, website, email: mosqueContactEmail } = req.body;
     if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) return sendError(res, 400, 'Verplichte registratievelden ontbreken.', null, req);
