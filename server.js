@@ -1,5 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.2.8 - Productieklare Authenticatie + Les & Absentie
+// Versie: 2.2.8 - Productieklare Authenticatie + Les & Absentie (of je huidige versie)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -23,15 +23,36 @@ if (!supabaseUrl || !supabaseKey) {
 }
 let supabase;
 try {
+  // Log de key die gebruikt wordt voor initialisatie
+  console.log("[INIT PRE-CREATE] Attempting Supabase client creation with key (first 10 chars of supabaseKey var):", supabaseKey ? supabaseKey.substring(0, 10) + "..." : "KEY NOT SET in supabaseKey var");
   supabase = createClient(supabaseUrl, supabaseKey);
-  console.log("✅ [INIT] Supabase client initialized successfully (with service_role privileges).");
+  console.log("✅ [INIT POST-CREATE] Supabase client object created."); // Basis check of supabase object zelf bestaat
+
+  // Directe check na creatie
+  if (supabase && supabase.auth && supabase.auth.admin) {
+      console.log("✅ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS available.");
+      console.log("✅ [INIT POST-CREATE DEBUG] Type of supabase.auth.admin.getUserByEmail:", typeof supabase.auth.admin.getUserByEmail);
+      // Log alle keys/methodes die beschikbaar zijn op supabase.auth.admin voor extra inzicht
+      console.log("✅ [INIT POST-CREATE DEBUG] Keys in supabase.auth.admin:", Object.keys(supabase.auth.admin).join(', '));
+  } else {
+      console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS NOT available.");
+      if (!supabase) console.error("❌ [INIT POST-CREATE DEBUG] supabase client is falsy.");
+      else if (!supabase.auth) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth is falsy.");
+      else if (!supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined.");
+  }
 } catch (initError) {
   console.error("❌ FATAL: Supabase client initialization FAILED:", initError.message, initError);
+  console.error("Full initialization error object:", initError); // Log het volledige error object
   process.exit(1);
 }
 
 async function testSupabaseConnection() {
   console.log("🚦 [DB STARTUP TEST] Attempting a simple query to Supabase...");
+  // Voeg een check toe of supabase wel geinitialiseerd is voordat je het gebruikt
+  if (!supabase) {
+    console.error("❌ [DB STARTUP TEST] Supabase client not initialized. Skipping test query.");
+    return;
+  }
   try {
     const { data, error, count } = await supabase.from('mosques').select('id', { count: 'exact' }).limit(1);
     if (error) {
@@ -66,23 +87,45 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// ==================================
+// DEBUG ROUTE (VOEG HIER TOE)
+// ==================================
 app.get('/api/debug-supabase-client', (req, res) => {
+    console.log("[DEBUG ROUTE] /api/debug-supabase-client HIT");
     let adminFunctionsAvailable = false;
     let getUserByEmailType = 'undefined';
     let listUsersType = 'undefined';
+    let authAdminObjectExists = false;
+    let availableAdminKeys = "N/A";
 
     if (supabase && supabase.auth && supabase.auth.admin) {
-        adminFunctionsAvailable = true;
+        authAdminObjectExists = true; 
         getUserByEmailType = typeof supabase.auth.admin.getUserByEmail;
         listUsersType = typeof supabase.auth.admin.listUsers;
+        availableAdminKeys = Object.keys(supabase.auth.admin).join(', ');
+        if (getUserByEmailType === 'function' && listUsersType === 'function') {
+             adminFunctionsAvailable = true;
+        }
+        console.log("[DEBUG ROUTE] supabase.auth.admin object found. typeof getUserByEmail:", getUserByEmailType, "typeof listUsers:", listUsersType);
+    } else {
+        console.error("[DEBUG ROUTE] supabase.auth.admin object NOT found or supabase/auth is missing.");
+        if (!supabase) console.error("[DEBUG ROUTE] supabase client is falsy.");
+        else if (!supabase.auth) console.error("[DEBUG ROUTE] supabase.auth is falsy.");
+        else if (supabase.auth && !supabase.auth.admin) console.error("[DEBUG ROUTE] supabase.auth.admin is falsy/undefined on the existing supabase.auth object.");
     }
+
     res.json({
-        message: "Supabase client debug info",
+        message: "Supabase client debug info from /api/debug-supabase-client",
+        timestamp: new Date().toISOString(),
         supabaseClientExists: !!supabase,
-        authAdminExists: adminFunctionsAvailable,
+        authObjectExists: !!(supabase && supabase.auth),
+        authAdminObjectExists: authAdminObjectExists,
+        adminFunctionsProperlyAvailable: adminFunctionsAvailable,
         typeOfGetUserByEmail: getUserByEmailType,
         typeOfListUsers: listUsersType,
-        actualSupabaseKeyUsedStart: supabaseKey ? supabaseKey.substring(0, 10) + "..." + supabaseKey.substring(supabaseKey.length - 5) : "KEY_NOT_SET_OR_EMPTY"
+        availableAdminKeys: availableAdminKeys,
+        keyUsedForInit_Start: supabaseKey ? supabaseKey.substring(0, 10) + "..." : "KEY_NOT_SET_AT_INIT_SCOPE",
+        keyUsedForInit_End: supabaseKey ? "..." + supabaseKey.substring(supabaseKey.length - 5) : "KEY_NOT_SET_AT_INIT_SCOPE"
     });
 });
 
