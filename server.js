@@ -1,5 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
-// Versie: 2.2.6 - Les & Absentie Management
+// Versie: 2.2.7 - Les & Absentie Management
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -67,49 +67,46 @@ app.use(cors({
 app.use(express.json());
 
 
-// TIJDELIJKE AUTH MIDDLEWARE (voor ontwikkeling)
-// VERVANG DIT MET JE ECHTE AUTHENTICATIE (bijv. Supabase Auth)
-// Deze middleware simuleert req.user. In productie heb je een veilige,
-// token-gebaseerde authenticatie nodig.
+// ==================================
+// AUTHENTICATIE MIDDLEWARE (PRODUCTIE)
+// ==================================
 app.use(async (req, res, next) => {
-    // Haal een test user ID of token uit een header als je dat wilt voor testen,
-    // bijv. 'Authorization: Bearer <USER_ID_OF_TOKEN>'
     const authHeader = req.headers.authorization;
-    let userIdToSimulate;
+    req.user = null; 
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
-        userIdToSimulate = authHeader.split(' ')[1];
-    }
-    
-    // Simuleer een gebruiker als er een ID is, of een default voor testen.
-    // Dit is ZEER ONVEILIG en alleen voor lokaal testen.
-    if (process.env.NODE_ENV === 'development' && !req.user) { // !req.user om te voorkomen dat het overschreven wordt als al gezet
-        if (userIdToSimulate) {
-            const { data: simulatedUser } = await supabase
-                .from('users')
-                .select('*')
-                .eq('id', userIdToSimulate)
-                .single();
-            if (simulatedUser) {
-                req.user = simulatedUser;
-                console.log(`[DEV AUTH SIMULATED] User: ${req.user.name} (Role: ${req.user.role}, Mosque: ${req.user.mosque_id}) for path ${req.path}`);
+        const token = authHeader.split(' ')[1];
+        try {
+            const { data: { user: supabaseUser }, error: authError } = await supabase.auth.getUser(token);
+
+            if (authError) {
+                console.warn(`[AUTH] Token validation failed for path ${req.path}: ${authError.message}`);
+            } else if (supabaseUser) {
+                const { data: appUser, error: appUserError } = await supabase
+                    .from('users') 
+                    .select('*') 
+                    .eq('id', supabaseUser.id) 
+                    .single();
+
+                if (appUserError) {
+                    console.error(`[AUTH] Error fetching app user from DB for Supabase ID ${supabaseUser.id}:`, appUserError.message);
+                } else if (appUser) {
+                    req.user = appUser; 
+                } else {
+                    console.warn(`[AUTH] App user not found in DB for Supabase user ID: ${supabaseUser.id}. Path: ${req.path}. Logging out Supabase session.`);
+                }
             } else {
-                console.warn(`[DEV AUTH] Could not find user to simulate with ID: ${userIdToSimulate}`);
+                 console.warn(`[AUTH] No Supabase user found for token. Path: ${req.path}`);
             }
-        } else if (req.path.includes('/teacher/') || req.path.includes('/lessons') || req.path.includes('/absenties')) {
-            // Fallback voor leraar-specifieke routes als er geen ID is meegegeven.
-            // VERVANG 'ECHTE_LERAAR_UUID' en 'ECHTE_MOSKEE_UUID_VAN_LERAAR' met testdata uit je DB.
-            // req.user = { id: 'ECHTE_LERAAR_UUID', role: 'teacher', mosque_id: 'ECHTE_MOSKEE_UUID_VAN_LERAAR', name: 'Dev Test Leraar' };
-            // console.warn(`[DEV AUTH FALLBACK] Using default Teacher for path ${req.path}. User: ${req.user?.name || 'NOT SET'}`);
-        } else if (req.path.includes('/admin/')) {
-            // Fallback voor admin routes
-            // req.user = { id: 'ECHTE_ADMIN_UUID', role: 'admin', mosque_id: 'ECHTE_MOSKEE_UUID_VAN_ADMIN', name: 'Dev Test Admin' };
-            // console.warn(`[DEV AUTH FALLBACK] Using default Admin for path ${req.path}. User: ${req.user?.name || 'NOT SET'}`);
+        } catch (e) {
+            console.error('[AUTH] Unexpected error during token processing:', e.message);
         }
     }
     next();
 });
-// EINDE TIJDELIJKE AUTH MIDDLEWARE
+// ==================================
+// EINDE AUTHENTICATIE MIDDLEWARE
+// ==================================
 
 
 const sendError = (res, statusCode, message, details = null, req = null) => {
@@ -250,27 +247,47 @@ async function sendM365EmailInternal(emailDetails) {
 // AUTHENTICATION ROUTES (JOUW CODE)
 // ======================
 app.post('/api/auth/login', async (req, res) => {
-  // JOUW BESTAANDE LOGIN LOGICA HIER (ongewijzigd)
   try {
     const { email, password, subdomain } = req.body;
     if (!email || !password || !subdomain) return sendError(res, 400, 'Email, password, and subdomain are required.', null, req);
     const normalizedSubdomain = subdomain.toLowerCase().trim();
     const normalizedEmail = email.toLowerCase().trim();
-
     const { data: mosque, error: mosqueError } = await supabase.from('mosques').select('id').eq('subdomain', normalizedSubdomain).single();
     if (mosqueError || !mosque) return sendError(res, 404, `Moskee met subdomein '${normalizedSubdomain}' niet gevonden.`, null, req);
+    
+    const { data: { user: supabaseAuthUser, session }, error: signInError } = await supabase.auth.signInWithPassword({
+      email: normalizedEmail,
+      password: password,
+    });
 
-    const { data: user, error: userError } = await supabase.from('users').select('*').eq('email', normalizedEmail).eq('mosque_id', mosque.id).single();
-    if (userError || !user) return sendError(res, 401, 'Ongeldige combinatie van email/wachtwoord of gebruiker niet gevonden voor deze moskee.', null, req);
+    if (signInError) {
+        if (signInError.message === 'Invalid login credentials') return sendError(res, 401, 'Ongeldige combinatie van email/wachtwoord.', null, req);
+        return sendError(res, 401, `Authenticatiefout: ${signInError.message}`, null, req);
+    }
+    if (!supabaseAuthUser || !session) { 
+        return sendError(res, 401, 'Ongeldige inlogpoging, geen gebruiker of sessie ontvangen.', null, req);
+    }
 
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) return sendError(res, 401, 'Ongeldige combinatie van email/wachtwoord.', null, req);
+    const { data: appUser, error: appUserError } = await supabase
+        .from('users')
+        .select('*') 
+        .eq('id', supabaseAuthUser.id) 
+        .eq('mosque_id', mosque.id) 
+        .single();
 
-    supabase.from('users').update({ last_login: new Date() }).eq('id', user.id).then(({error: updateErr}) => { if(updateErr) console.error("Error updating last_login for user "+user.id+":", updateErr.message)});
-    const { password_hash, ...userWithoutPassword } = user;
+    if (appUserError || !appUser) { 
+        await supabase.auth.signOut(); 
+        return sendError(res, 401, 'Gebruiker gevonden in authenticatiesysteem, maar niet in applicatiedatabase voor deze moskee of gegevens inconsistent.', null, req); 
+    }
+
+    await supabase.from('users').update({ last_login: new Date() }).eq('id', appUser.id);
+    const { password_hash, ...userWithoutPassword } = appUser; 
+    
     res.json({ success: true, user: userWithoutPassword });
-  } catch (error) {
-    sendError(res, 500, 'Interne serverfout tijdens login.', error.message, req);
+
+  } catch (error) { 
+    console.error("Login error (outer catch):", error); 
+    sendError(res, 500, 'Interne serverfout tijdens login.', error.message, req); 
   }
 });
 
@@ -278,71 +295,36 @@ app.post('/api/auth/login', async (req, res) => {
 // REGISTRATION ROUTE (JOUW CODE)
 // ======================
 app.post('/api/mosques/register', async (req, res) => {
-  // JOUW BESTAANDE REGISTRATIE LOGICA HIER (ongewijzigd)
   try {
     const { mosqueName, subdomain, adminName, adminEmail, adminPassword, address, city, zipcode, phone, website, email: mosqueContactEmail } = req.body;
     if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) return sendError(res, 400, 'Verplichte registratievelden ontbreken.', null, req);
     if (adminPassword.length < 8) return sendError(res, 400, 'Admin wachtwoord moet minimaal 8 karakters lang zijn.', null, req);
-
-    const normalizedSubdomain = subdomain.toLowerCase().trim();
-    const normalizedAdminEmail = adminEmail.toLowerCase().trim();
-
+    const normalizedSubdomain = subdomain.toLowerCase().trim(); const normalizedAdminEmail = adminEmail.toLowerCase().trim();
     const { data: existingSubdomain } = await supabase.from('mosques').select('id').eq('subdomain', normalizedSubdomain).maybeSingle();
     if (existingSubdomain) return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
-
-    const { data: existingAdminEmailUser } = await supabase.from('users').select('id').eq('email', normalizedAdminEmail).maybeSingle();
-    if (existingAdminEmailUser) return sendError(res, 409, 'Dit emailadres voor de beheerder is al geregistreerd in het systeem.', null, req);
-
-
-    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{
-        name: mosqueName, subdomain: normalizedSubdomain, address, city, zipcode, phone,
-        email: mosqueContactEmail || normalizedAdminEmail, website, m365_configured: false,
-        contribution_1_child: 150, contribution_2_children: 300, contribution_3_children: 450,
-        contribution_4_children: 450, contribution_5_plus_children: 450,
-        m365_sender_email: null,
-    }]).select().single();
+    try { const { data: { user: existingAuthUser } } = await supabase.auth.admin.getUserByEmail(normalizedAdminEmail); if (existingAuthUser) return sendError(res, 409, 'Dit emailadres is al geregistreerd in het authenticatiesysteem.', null, req); } catch (error) { if (error.message && !error.message.includes('User not found')) { console.error("Error checking existing auth user for registration:", error); return sendError(res, 500, "Fout bij controleren bestaande auth gebruiker.", error.message, req); } }
+    const { data: existingAppUser } = await supabase.from('users').select('id').eq('email', normalizedAdminEmail).maybeSingle();
+    if (existingAppUser) return sendError(res, 409, 'Dit emailadres is al geregistreerd voor een gebruiker in de applicatie.', null, req);
+    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{name: mosqueName, subdomain: normalizedSubdomain, address, city, zipcode, phone, email: mosqueContactEmail || normalizedAdminEmail, website, m365_configured: false, contribution_1_child: 150, contribution_2_children: 300, contribution_3_children: 450, contribution_4_children: 450, contribution_5_plus_children: 450, m365_sender_email: null, }]).select().single();
     if (mosqueCreateError) throw mosqueCreateError;
-
+    const { data: { user: supabaseAuthAdmin }, error: supabaseAuthError } = await supabase.auth.admin.createUser({ email: normalizedAdminEmail, password: adminPassword, email_confirm: true });
+    if (supabaseAuthError) { await supabase.from('mosques').delete().eq('id', newMosque.id); return sendError(res, 500, `Fout bij aanmaken authenticatie gebruiker: ${supabaseAuthError.message}`, supabaseAuthError, req); }
+    if (!supabaseAuthAdmin) { await supabase.from('mosques').delete().eq('id', newMosque.id); return sendError(res, 500, 'Kon authenticatie gebruiker niet aanmaken (geen user object).', null, req); }
     const password_hash = await bcrypt.hash(adminPassword, 10);
-    const { data: newAdmin, error: adminCreateError } = await supabase.from('users').insert([{ mosque_id: newMosque.id, email: normalizedAdminEmail, password_hash, name: adminName, role: 'admin', is_temporary_password: false }]).select('id, email, name, role').single();
-    if (adminCreateError) { 
-      await supabase.from('mosques').delete().eq('id', newMosque.id); 
-      throw adminCreateError; 
-    }
-    
-    if (newAdmin && newMosque.m365_configured && newMosque.m365_sender_email) { 
-        console.log(`[Mosque Register] New admin ${newAdmin.email} for mosque ${newMosque.name}. M365 configured, attempting admin welcome email.`);
+    const { data: newAppAdmin, error: appAdminCreateError } = await supabase.from('users').insert([{ id: supabaseAuthAdmin.id, mosque_id: newMosque.id, email: normalizedAdminEmail, password_hash, name: adminName, role: 'admin', is_temporary_password: false }]).select('id, email, name, role').single();
+    if (appAdminCreateError) { await supabase.from('mosques').delete().eq('id', newMosque.id); await supabase.auth.admin.deleteUser(supabaseAuthAdmin.id); throw appAdminCreateError; }
+    if (newAppAdmin && newMosque.m365_configured && newMosque.m365_sender_email) { 
+        console.log(`[Mosque Register] New admin ${newAppAdmin.email} for mosque ${newMosque.name}. M365 configured, attempting admin welcome email.`);
         const adminWelcomeSubject = `Welkom als beheerder bij ${newMosque.name}!`;
-        const adminWelcomeBody = `
-            <h1>Welkom ${adminName},</h1>
-            <p>Uw beheerdersaccount voor het leerlingvolgsysteem van ${newMosque.name} is succesvol aangemaakt.</p>
-            <p>U kunt inloggen met de volgende gegevens:</p>
-            <ul>
-                <li><strong>Email:</strong> ${normalizedAdminEmail}</li>
-                <li><strong>Wachtwoord:</strong> ${adminPassword} (het wachtwoord dat u zojuist heeft opgegeven)</li>
-            </ul>
-            <p>Log in via: https://${normalizedSubdomain}.mijnlvs.nl</p>
-            <p>Met vriendelijke groet,</p>
-            <p>Het MijnLVS Team</p>
-        `;
-        sendM365EmailInternal({
-            to: normalizedAdminEmail,
-            subject: adminWelcomeSubject,
-            body: adminWelcomeBody,
-            mosqueId: newMosque.id,
-            emailType: 'm365_admin_mosque_registration_welcome'
-        }).then(result => {
-            if (result.success) console.log(`[Mosque Register] Admin welcome email to ${normalizedAdminEmail} sent/queued. MsgID: ${result.messageId}`);
-            else console.error(`[Mosque Register] Failed to send admin welcome email to ${normalizedAdminEmail}: ${result.error}`, result.details);
-        }).catch(err => console.error(`[Mosque Register] Critical error sending admin welcome email:`, err));
-    } else if (newAdmin) {
-        console.log(`[Mosque Register] New admin ${newAdmin.email} created for ${newMosque.name}. M365 not yet configured (or sender missing), so no welcome email sent automatically.`);
+        const adminWelcomeBody = `<h1>Welkom ${adminName},</h1><p>Uw beheerdersaccount voor het leerlingvolgsysteem van ${newMosque.name} is succesvol aangemaakt.</p><p>U kunt inloggen met de volgende gegevens:</p><ul><li><strong>Email:</strong> ${normalizedAdminEmail}</li><li><strong>Wachtwoord:</strong> ${adminPassword} (het wachtwoord dat u zojuist heeft opgegeven)</li></ul><p>Log in via: https://${normalizedSubdomain}.mijnlvs.nl</p><p>Met vriendelijke groet,</p><p>Het MijnLVS Team</p>`;
+        sendM365EmailInternal({ to: normalizedAdminEmail, subject: adminWelcomeSubject, body: adminWelcomeBody, mosqueId: newMosque.id, emailType: 'm365_admin_mosque_registration_welcome' })
+        .then(result => { if (result.success) console.log(`[Mosque Register] Admin welcome email to ${normalizedAdminEmail} sent/queued. MsgID: ${result.messageId}`); else console.error(`[Mosque Register] Failed to send admin welcome email to ${normalizedAdminEmail}: ${result.error}`, result.details); })
+        .catch(err => console.error(`[Mosque Register] Critical error sending admin welcome email:`, err));
+    } else if (newAppAdmin) {
+        console.log(`[Mosque Register] New admin ${newAppAdmin.email} created for ${newMosque.name}. M365 not yet configured (or sender missing), so no welcome email sent automatically.`);
     }
-
-    res.status(201).json({ success: true, message: 'Registratie succesvol!', mosque: newMosque, admin: newAdmin });
-  } catch (error) {
-    sendError(res, error.code === '23505' ? 409 : (error.status || 400), error.message || 'Fout bij registratie.', error.details || error.hint || error, req);
-  }
+    res.status(201).json({ success: true, message: 'Registratie succesvol!', mosque: newMosque, admin: newAppAdmin });
+  } catch (error) { sendError(res, error.code === '23505' || (error.message && error.message.includes('already registered')) ? 409 : (error.status || 400), error.message || 'Fout bij registratie.', error.details || error.hint || error, req); }
 });
 
 
@@ -441,64 +423,157 @@ const calculateAmountDueFromStaffel = (childCount, mosqueSettings) => {
 };
 
 // ======================
-// GENERIC CRUD HELPER & ENDPOINTS (JOUW CODE)
+// GENERIC CRUD HELPER & ENDPOINTS (MET AUTORISATIE)
 // ======================
 const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride = null) => {
-    // JOUW CODE
     const singularName = singularNameOverride || tableName.slice(0, -1);
+
+    // GET all resources for a mosque
     app.get(`/api/mosques/:mosqueId/${tableName}`, async (req, res) => {
+        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
+        if (req.user.mosque_id !== req.params.mosqueId && req.user.role !== 'superadmin') { // 'superadmin' als voorbeeld voor een rol die overal bij mag
+            return sendError(res, 403, "Niet geautoriseerd voor data van deze moskee.", null, req);
+        }
+        // Leraren mogen mogelijk alleen bepaalde tabellen zien, of gefilterde data.
+        // Voor nu: als je een leraar bent, en je bent van de moskee, mag je de data zien. Verfijn dit indien nodig.
+        // if (req.user.role === 'teacher' && !['classes', 'students'].includes(tableName)) { 
+        //    return sendError(res, 403, "Leraren hebben geen toegang tot deze data.", null, req);
+        // }
+
         try {
             const { mosqueId } = req.params;
             let query = supabase.from(tableName).select(selectString).eq('mosque_id', mosqueId);
             if (tableName === 'users' && req.query.role) query = query.eq('role', req.query.role);
-            if (tableName === 'classes' || tableName === 'students') query = query.eq('active', true);
+            if (tableName === 'classes' || tableName === 'students') query = query.eq('active', true); // Behoud je bestaande filters
             query = query.order('created_at', { ascending: false });
             const { data, error } = await query;
             if (error) throw error;
             res.json(data);
         } catch (error) { sendError(res, 500, `Fout bij ophalen ${tableName}.`, error.message, req); }
     });
+
+    // GET a single resource by ID
     app.get(`/api/${tableName}/:id`, async (req, res) => {
+        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
         try {
             const { id } = req.params;
             const { data, error } = await supabase.from(tableName).select(selectString).eq('id', id).single();
             if (error || !data) return sendError(res, 404, `${singularName} niet gevonden.`, null, req);
+
+            // Autorisatie: gebruiker moet van dezelfde moskee zijn als de resource,
+            // tenzij het de user zelf is (voor profiel) of een superadmin.
+            let authorized = (req.user.role === 'superadmin');
+            if (!authorized && data.mosque_id) { // Als de resource een mosque_id heeft
+                if (req.user.mosque_id !== data.mosque_id) {
+                    // Uitzondering: een gebruiker mag zijn eigen profiel ophalen, zelfs als mosque_id check faalt (onwaarschijnlijk scenario maar defensief)
+                    if (tableName === 'users' && req.user.id === id) {
+                        authorized = true;
+                    } else {
+                        return sendError(res, 403, "Niet geautoriseerd voor deze specifieke resource (verkeerde moskee).", null, req);
+                    }
+                } else {
+                    authorized = true; // Gebruiker is van dezelfde moskee
+                }
+            } else if (!authorized && tableName === 'users' && req.user.id === id) {
+                authorized = true; // Gebruiker mag eigen profiel ophalen
+            } else if (!authorized && !data.mosque_id && tableName !== 'users'){
+                 // Resource heeft geen mosque_id, en het is niet de user zelf die zijn profiel ophaalt
+                 console.warn(`Resource ${tableName}/${id} has no mosque_id for authorization check by user ${req.user.id}.`);
+                 return sendError(res, 403, "Autorisatie niet mogelijk: resource mist moskee koppeling of u bent niet gemachtigd.", null, req);
+            }
+            
+            if (!authorized) return sendError(res, 403, "Niet geautoriseerd.", null, req);
             res.json(data);
         } catch (error) { sendError(res, 500, `Fout bij ophalen ${singularName}.`, error.message, req); }
     });
+
+    // UPDATE a resource by ID
     app.put(`/api/${tableName}/:id`, async (req, res) => {
+        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
         try {
-            const { id } = req.params;
+            const { id } = req.params; 
+            const { data: resource, error: fetchErr } = await supabase.from(tableName).select('mosque_id').eq('id', id).single();
+            if (fetchErr || !resource) return sendError(res, 404, `${singularName} niet gevonden voor update.`, null, req);
+            
+            let authorizedToEdit = false;
+            if (req.user.role === 'superadmin') authorizedToEdit = true;
+            else if (req.user.mosque_id === resource.mosque_id) {
+                if (req.user.role === 'admin') authorizedToEdit = true;
+                // Een gebruiker (niet ouder) mag zijn eigen profiel (users tabel) wijzigen.
+                // Ouders mogen NIET hun 'amount_due' of 'role' etc. wijzigen via deze generieke route.
+                else if (tableName === 'users' && req.user.id === id && req.user.role !== 'parent') {
+                    // Beperk welke velden een niet-admin gebruiker mag wijzigen
+                    const allowedUserUpdates = ['name', 'phone', 'address', 'city', 'zipcode'];
+                    if (req.body.password) allowedUserUpdates.push('password'); // Wachtwoord wijzigen ook (aparte logica in body)
+                    for (const key in req.body) {
+                        if (!allowedUserUpdates.includes(key) && key !== 'updated_at') { // updated_at wordt door server gezet
+                            return sendError(res, 403, `Veld '${key}' mag niet gewijzigd worden door gebruiker.`, null, req);
+                        }
+                    }
+                    authorizedToEdit = true;
+                }
+            }
+            if (!authorizedToEdit) return sendError(res, 403, "Niet geautoriseerd om deze resource te bewerken.", null, req);
+
             const updateData = { ...req.body, updated_at: new Date() };
             delete updateData.mosque_id; delete updateData.id; delete updateData.created_at;
-            if (tableName === 'users' && updateData.password) {
-                updateData.password_hash = await bcrypt.hash(updateData.password, 10);
-                delete updateData.password;
-                updateData.is_temporary_password = false;
-            } else if (tableName === 'users') { delete updateData.password_hash; }
-            if (tableName === 'users' && req.body.role === 'parent') { delete updateData.amount_due; }
+
+            if (tableName === 'users' && updateData.password) { 
+                // Voor wachtwoordwijziging door gebruiker zelf, zou je Supabase Auth moeten gebruiken.
+                // Admin kan hier wel een wachtwoord resetten, de hash wordt hier opgeslagen.
+                updateData.password_hash = await bcrypt.hash(updateData.password, 10); 
+                // Supabase Auth wachtwoord moet apart geüpdatet worden als user zelf wijzigt!
+                delete updateData.password; 
+                updateData.is_temporary_password = false; 
+            } else if (tableName === 'users') { delete updateData.password_hash; } // Verwijder hash als er geen nieuw wachtwoord is
+            
+            // Voorkom dat niet-admins bepaalde velden van users wijzigen
+            if (tableName === 'users' && req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+                delete updateData.role;
+                delete updateData.amount_due;
+                delete updateData.mosque_id; // Hoewel al verwijderd, voor de zekerheid
+                delete updateData.is_temporary_password;
+            }
+             // Voorkom dat admins amount_due van ouders direct via deze generieke route wijzigen
+            if (tableName === 'users' && req.body.role === 'parent' && req.user.role === 'admin') {
+                 delete updateData.amount_due; 
+            }
+
+
             const { data, error } = await supabase.from(tableName).update(updateData).eq('id', id).select(selectString).single();
-            if (error) throw error;
+            if (error) throw error; 
             res.json({ success: true, message: `${singularName} bijgewerkt.`, [singularName]: data });
         } catch (error) { sendError(res, 500, `Fout bij bijwerken ${singularName}.`, error.message, req); }
     });
+
+    // DELETE a resource by ID
     app.delete(`/api/${tableName}/:id`, async (req, res) => {
+        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
         try {
             const { id } = req.params;
+            const { data: resource, error: fetchErr } = await supabase.from(tableName).select('mosque_id, email').eq('id', id).single(); 
+            if (fetchErr || !resource) return sendError(res, 404, `${singularName} niet gevonden voor verwijdering.`, null, req);
+            if (req.user.mosque_id !== resource.mosque_id && req.user.role !== 'superadmin') return sendError(res, 403, "Niet geautoriseerd voor deze resource.", null, req);
+            if (req.user.role !== 'admin' && req.user.role !== 'superadmin') return sendError(res, 403, "Alleen admins mogen dit verwijderen.", null, req);
+
             if (tableName === 'students') {
                 const { data: studentToDelete, error: studentFetchError } = await supabase.from('students').select('parent_id, mosque_id').eq('id', id).single();
                 if (studentFetchError || !studentToDelete) return sendError(res, 404, "Leerling niet gevonden.", null, req);
-                const { error: deleteError } = await supabase.from(tableName).delete().eq('id', id);
-                if (deleteError) throw deleteError;
+                const { error: deleteError } = await supabase.from(tableName).delete().eq('id', id); if (deleteError) throw deleteError;
                 if (studentToDelete.parent_id && studentToDelete.mosque_id) {
                     const { data: mosqueSettings } = await supabase.from('mosques').select('contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children').eq('id', studentToDelete.mosque_id).single();
                     const { count: siblingCount } = await supabase.from('students').select('id', { count: 'exact' }).eq('parent_id', studentToDelete.parent_id).eq('active', true);
                     const newAmountDue = calculateAmountDueFromStaffel(siblingCount || 0, mosqueSettings);
                     await supabase.from('users').update({ amount_due: newAmountDue }).eq('id', studentToDelete.parent_id);
                 }
-            } else {
-                 const { error } = await supabase.from(tableName).delete().eq('id', id);
-                 if (error) throw error;
+            } else { 
+                const { error } = await supabase.from(tableName).delete().eq('id', id); if (error) throw error;
+                if (tableName === 'users' && resource.email) { // resource.email was geselecteerd
+                    const { error: authDeleteError } = await supabase.auth.admin.deleteUser(id); 
+                    if (authDeleteError && authDeleteError.message !== 'User not found') { 
+                        console.warn(`Kon Supabase Auth user ${id} (${resource.email}) niet verwijderen: ${authDeleteError.message}`);
+                    }
+                }
             }
             res.status(200).json({ success: true, message: `${singularName} verwijderd.` });
         } catch (error) { sendError(res, 500, `Fout bij verwijderen ${singularName}.`, error.message, req); }
@@ -513,111 +588,36 @@ createCrudEndpoints('payments', '*, parent:parent_id(id, name, email), student:s
 // SPECIFIC POST ROUTES (JOUW CODE)
 // ======================
 app.post('/api/users', async (req, res) => {
-  // JOUW CODE
   try {
-    const { 
-        mosque_id, email, name, role, phone, address, city, zipcode, 
-        password: plainTextPassword, 
-        sendWelcomeEmail = true 
-    } = req.body;
-    
-    if (!mosque_id || !email || !name || !role || !plainTextPassword) return sendError(res, 400, "Verplichte velden (mosque_id, email, name, role, password) ontbreken.", null, req);
+    const { mosque_id, email, name, role, phone, address, city, zipcode, password: plainTextPassword, sendWelcomeEmail = true } = req.body;
+    if (!req.user || req.user.role !== 'admin' || req.user.mosque_id !== mosque_id) return sendError(res, 403, "Niet geautoriseerd om gebruikers toe te voegen aan deze moskee.", null, req);
+    if (!mosque_id || !email || !name || !role || !plainTextPassword) return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
     if (plainTextPassword.length < 8) return sendError(res, 400, "Wachtwoord moet minimaal 8 karakters lang zijn.", null, req);
-
+    const normalizedEmail = email.toLowerCase().trim();
+    const { data: { user: supabaseAuthUser }, error: supabaseAuthError } = await supabase.auth.admin.createUser({ email: normalizedEmail, password: plainTextPassword, email_confirm: true });
+    if (supabaseAuthError) { if (supabaseAuthError.message.includes('User already registered')) return sendError(res, 409, `Email ${normalizedEmail} is al geregistreerd in authenticatiesysteem.`, supabaseAuthError.message, req); return sendError(res, 500, `Fout bij aanmaken auth user: ${supabaseAuthError.message}`, supabaseAuthError, req); }
+    if (!supabaseAuthUser) return sendError(res, 500, 'Kon auth user niet aanmaken (geen user object).', null, req);
     const password_hash = await bcrypt.hash(plainTextPassword, 10);
-    const userData = { mosque_id, email: email.toLowerCase().trim(), password_hash, name, role, is_temporary_password: true, phone, address, city, zipcode, amount_due: role === 'parent' ? 0 : null };
-    
-    const { data: user, error: userCreateError } = await supabase.from('users').insert([userData]).select('id, email, name, role, phone, address, city, zipcode, amount_due, created_at, mosque_id').single();
-    
-    if (userCreateError) {
-      if (userCreateError.code === '23505' && userCreateError.message.includes('users_email_key')) { 
-        return sendError(res, 409, `Een gebruiker met e-mailadres ${email} bestaat al in het systeem.`, userCreateError.details, req);
-      }
-      throw userCreateError;
-    }
-    
-    if (user && user.role === 'parent' && sendWelcomeEmail) {
-      console.log(`[POST /api/users] Parent user ${user.email} created. 'sendWelcomeEmail' is true. Attempting to send welcome email.`);
-      
-      let mosqueNameForEmail = 'uw moskee';
-      let mosqueSubdomain = ''; 
-      
+    const appUserData = { id: supabaseAuthUser.id, mosque_id, email: normalizedEmail, password_hash, name, role, is_temporary_password: true, phone, address, city, zipcode, amount_due: role === 'parent' ? 0 : null };
+    const { data: appUser, error: appUserCreateError } = await supabase.from('users').insert([appUserData]).select('id, email, name, role, phone, address, city, zipcode, amount_due, created_at, mosque_id').single();
+    if (appUserCreateError) { await supabase.auth.admin.deleteUser(supabaseAuthUser.id); if (appUserCreateError.code === '23505' && appUserCreateError.message.includes('users_email_key')) return sendError(res, 409, `Email ${normalizedEmail} bestaat al in applicatie database.`, appUserCreateError.details, req); throw appUserCreateError; }
+    if (appUser && appUser.role === 'parent' && sendWelcomeEmail) {
+      let mosqueNameForEmail = 'uw moskee'; let mosqueSubdomain = ''; 
       try {
-        const { data: mosqueDataLookup } = await supabase
-            .from('mosques')
-            .select('name, subdomain, m365_configured') 
-            .eq('id', user.mosque_id)
-            .single();
-            
-        if (mosqueDataLookup) {
-          if (mosqueDataLookup.name) mosqueNameForEmail = mosqueDataLookup.name;
-          if (mosqueDataLookup.subdomain) mosqueSubdomain = mosqueDataLookup.subdomain;
+        const { data: mosqueDataLookup } = await supabase.from('mosques').select('name, subdomain, m365_configured').eq('id', appUser.mosque_id).single();
+        if (mosqueDataLookup) { if (mosqueDataLookup.name) mosqueNameForEmail = mosqueDataLookup.name; if (mosqueDataLookup.subdomain) mosqueSubdomain = mosqueDataLookup.subdomain; }
+        if (!mosqueDataLookup || !mosqueDataLookup.m365_configured) { console.warn(`[POST /api/users] M365 not configured for mosque ${appUser.mosque_id}. Welcome email for ${appUser.email} NOT sent.`); } else {
+            const emailSubject = `Welkom bij ${mosqueNameForEmail}! Uw account is aangemaakt.`; let loginLink = `https://mijnlvs.nl`; let emailTypeForLog = 'm365_parent_welcome_email_generic_link';
+            if (mosqueSubdomain) { loginLink = `https://${mosqueSubdomain}.mijnlvs.nl`; emailTypeForLog = 'm365_parent_welcome_email'; }
+            const emailBody = `<!DOCTYPE html><html lang="nl"><head><meta charset="UTF-8"><title>${emailSubject}</title></head><body><p>Beste ${appUser.name},</p><p>Uw account voor het leerlingvolgsysteem van ${mosqueNameForEmail} is succesvol aangemaakt.</p><p>U kunt inloggen met de volgende gegevens:</p><ul><li><strong>E-mailadres:</strong> ${appUser.email}</li><li><strong>Tijdelijk wachtwoord:</strong> ${plainTextPassword}</li></ul><p>Wij adviseren u dringend om uw wachtwoord direct na de eerste keer inloggen te wijzigen via uw profielpagina.</p><p>U kunt inloggen via: <a href="${loginLink}">${loginLink}</a>.</p><br><p>Met vriendelijke groet,</p><p>Het bestuur van ${mosqueNameForEmail}</p></body></html>`;
+            sendM365EmailInternal({ to: appUser.email, subject: emailSubject, body: emailBody, mosqueId: appUser.mosque_id, emailType: emailTypeForLog })
+            .then(emailResult => { if (!emailResult.success) console.error(`[POST /api/users] ASYNC ERROR sending welcome email to ${appUser.email}: ${emailResult.error}`, emailResult.details || ''); else console.log(`[POST /api/users] ASYNC SUCCESS: Welcome email to ${appUser.email} sent/queued. MsgID: ${emailResult.messageId}`);})
+            .catch(emailSendingError => console.error(`[POST /api/users] ASYNC CRITICAL ERROR during welcome email:`, emailSendingError.message, emailSendingError.stack));
         }
-
-        if (!mosqueDataLookup || !mosqueDataLookup.m365_configured) {
-            console.warn(`[POST /api/users] M365 not configured for mosque ${user.mosque_id} (${mosqueNameForEmail}). Welcome email for ${user.email} will NOT be sent.`);
-        } else {
-            const emailSubject = `Welkom bij ${mosqueNameForEmail}! Uw account is aangemaakt.`;
-            let loginLink = `https://mijnlvs.nl`; // Default generic link
-            let emailTypeForLog = 'm365_parent_welcome_email_generic_link';
-
-            if (mosqueSubdomain) {
-                loginLink = `https://${mosqueSubdomain}.mijnlvs.nl`;
-                emailTypeForLog = 'm365_parent_welcome_email'; // Specific link type
-                console.log(`[POST /api/users] Using specific login link for ${user.email}: ${loginLink}`);
-            } else {
-                console.warn(`[POST /api/users] Subdomain not found for mosque ${user.mosque_id} (${mosqueNameForEmail}). Using generic login link for ${user.email}.`);
-            }
-            
-            const emailBody = `
-                <!DOCTYPE html>
-                <html lang="nl">
-                <head><meta charset="UTF-8"><title>${emailSubject}</title></head>
-                <body>
-                    <p>Beste ${user.name},</p>
-                    <p>Uw account voor het leerlingvolgsysteem van ${mosqueNameForEmail} is succesvol aangemaakt.</p>
-                    <p>U kunt inloggen met de volgende gegevens:</p>
-                    <ul>
-                        <li><strong>E-mailadres:</strong> ${user.email}</li>
-                        <li><strong>Tijdelijk wachtwoord:</strong> ${plainTextPassword}</li>
-                    </ul>
-                    <p>Wij adviseren u dringend om uw wachtwoord direct na de eerste keer inloggen te wijzigen via uw profielpagina.</p>
-                    <p>U kunt inloggen via: <a href="${loginLink}">${loginLink}</a>.</p>
-                    <br>
-                    <p>Met vriendelijke groet,</p>
-                    <p>Het bestuur van ${mosqueNameForEmail}</p>
-                </body>
-                </html>
-            `;
-
-            sendM365EmailInternal({
-                to: user.email,
-                subject: emailSubject,
-                body: emailBody,
-                mosqueId: user.mosque_id,
-                emailType: emailTypeForLog
-            }).then(emailResult => {
-                if (!emailResult.success) {
-                  console.error(`[POST /api/users] ASYNC ERROR: Failed to send welcome email to ${user.email}. Error: ${emailResult.error}`, emailResult.details || '');
-                } else {
-                  console.log(`[POST /api/users] ASYNC SUCCESS: Welcome email to ${user.email} reported as sent/queued. MsgID: ${emailResult.messageId}`);
-                }
-            }).catch(emailSendingError => {
-                console.error(`[POST /api/users] ASYNC CRITICAL ERROR during welcome email sending to ${user.email}:`, emailSendingError.message, emailSendingError.stack);
-            });
-        }
-      } catch (mosqueLookupError) {
-          console.error(`[POST /api/users] ASYNC ERROR: Error looking up mosque details for welcome email to ${user.email}:`, mosqueLookupError.message);
-      }
-    } else if (user && user.role === 'parent' && !sendWelcomeEmail) {
-        console.log(`[POST /api/users] Parent user ${user.email} created, but 'sendWelcomeEmail' was false. No email sent.`);
-    }
-    
-    res.status(201).json({ success: true, user });
-
-  } catch (error) { 
-    sendError(res, error.status || (error.code === '23505' ? 409 : 500), error.message || 'Fout bij aanmaken gebruiker.', error.details || error.hint || error.toString(), req);
-  }
+      } catch (mosqueLookupError) { console.error(`[POST /api/users] ASYNC ERROR looking up mosque details for welcome email to ${appUser.email}:`, mosqueLookupError.message); }
+    } else if (appUser && appUser.role === 'parent' && !sendWelcomeEmail) { console.log(`[POST /api/users] Parent user ${appUser.email} created, but 'sendWelcomeEmail' was false. No email sent.`);}
+    res.status(201).json({ success: true, user: appUser });
+  } catch (error) { sendError(res, error.status || (error.code === '23505' || (error.message && error.message.includes('already registered'))) ? 409 : 500, error.message || 'Fout bij aanmaken gebruiker.', error.details || error.hint || error.toString(), req); }
 });
 app.post('/api/classes', async (req, res) => {
   // JOUW CODE
@@ -630,10 +630,13 @@ app.post('/api/classes', async (req, res) => {
   } catch (error) { sendError(res, 500, 'Fout bij aanmaken klas.', error.message, req); }
 });
 app.post('/api/students', async (req, res) => {
-  // JOUW CODE
+  const { mosque_id, parent_id, class_id, name, date_of_birth, emergency_contact, emergency_phone, notes } = req.body;
+  // AUTORISATIE CHECK
+  if (!req.user || req.user.role !== 'admin' || req.user.mosque_id !== mosque_id) {
+      return sendError(res, 403, "Niet geautoriseerd om leerlingen aan te maken voor deze moskee.", null, req);
+  }
   try {
-    const { mosque_id, parent_id, class_id, name, date_of_birth, emergency_contact, emergency_phone, notes } = req.body;
-    if (!mosque_id || !parent_id || !class_id || !name) return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
+    if (!mosque_id || !parent_id || !class_id || !name) return sendError(res, 400, "Verplichte velden (mosque_id, parent_id, class_id, name) ontbreken.", null, req);
     const { data: student, error } = await supabase.from('students').insert([{ mosque_id, parent_id, class_id, name, date_of_birth, emergency_contact, emergency_phone, notes }]).select().single();
     if (error) throw error;
     const { data: mosqueSettings } = await supabase.from('mosques').select('contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children').eq('id', mosque_id).single();
@@ -645,11 +648,15 @@ app.post('/api/students', async (req, res) => {
   } catch (error) { sendError(res, 500, 'Fout bij aanmaken leerling.', error.message, req); }
 });
 app.post('/api/payments', async (req, res) => {
-  // JOUW CODE
+  const { mosque_id, parent_id, student_id, amount, payment_method, payment_date, description, notes } = req.body;
+  // AUTORISATIE CHECK (processed_by wordt nu req.user.id)
+  if (!req.user || req.user.role !== 'admin' || req.user.mosque_id !== mosque_id) {
+      return sendError(res, 403, "Niet geautoriseerd om betalingen te registreren voor deze moskee.", null, req);
+  }
   try {
-    const { mosque_id, parent_id, student_id, amount, payment_method, payment_date, description, notes, processed_by } = req.body;
-    if (!mosque_id || !parent_id || !amount || !payment_method || !payment_date) return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
-    const { data: payment, error } = await supabase.from('payments').insert([{ mosque_id, parent_id, student_id, amount, payment_method, payment_date, description, notes, processed_by }]).select().single();
+    if (!mosque_id || !parent_id || !amount || !payment_method || !payment_date) return sendError(res, 400, "Verplichte velden (mosque_id, parent_id, amount, payment_method, payment_date) ontbreken.", null, req);
+    const actualProcessedBy = req.user.id; // Gebruik altijd ID van ingelogde admin
+    const { data: payment, error } = await supabase.from('payments').insert([{ mosque_id, parent_id, student_id, amount, payment_method, payment_date, description, notes, processed_by: actualProcessedBy }]).select().single();
     if (error) throw error;
     res.status(201).json({ success: true, payment });
   } catch (error) { sendError(res, 500, 'Fout bij aanmaken betaling.', error.message, req); }
@@ -659,83 +666,35 @@ app.post('/api/payments', async (req, res) => {
 // NIEUWE WACHTWOORD E-MAIL ROUTE (JOUW CODE)
 // ==================================
 app.post('/api/users/:userId/send-new-password', async (req, res) => {
-  // JOUW CODE
   const { userId } = req.params;
-  console.log(`[SEND NEW PWD] Request received for user ID: ${userId}`);
-
+  if (!req.user || req.user.role !== 'admin') return sendError(res, 403, "Niet geautoriseerd.", null, req); 
+  console.log(`[SEND NEW PWD] Request by ${req.user.email} for user ID: ${userId}`);
   try {
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('id, email, name, role, mosque_id, mosque:mosque_id (name, subdomain, m365_configured)')
-      .eq('id', userId)
-      .single();
-
-    if (userError || !user) {
-      return sendError(res, 404, 'Gebruiker niet gevonden.', userError ? userError.message : 'Geen data', req);
-    }
-    if (!user.mosque || !user.mosque.name || !user.mosque.subdomain) {
-      console.error(`[SEND NEW PWD] Incomplete mosque data for user ${userId}:`, user.mosque);
-      return sendError(res, 500, 'Moskee informatie (naam/subdomein) ontbreekt voor deze gebruiker of kon niet worden geladen.', null, req);
-    }
-    
-    console.log(`[SEND NEW PWD] Found user: ${user.email}, Role: ${user.role}, Mosque: ${user.mosque.name} (Subdomain: ${user.mosque.subdomain}, M365 Configured: ${user.mosque.m365_configured})`);
+    const { data: user, error: userError } = await supabase.from('users').select('id, email, name, role, mosque_id, mosque:mosque_id (name, subdomain, m365_configured)').eq('id', userId).single();
+    if (userError || !user) return sendError(res, 404, 'Gebruiker niet gevonden.', userError ? userError.message : 'Geen data', req);
+    if (req.user.mosque_id !== user.mosque_id && req.user.role !== 'superadmin') return sendError(res, 403, "Admin niet van dezelfde moskee als gebruiker.", null, req);
+    if (!user.mosque || !user.mosque.name || !user.mosque.subdomain) { console.error(`[SEND NEW PWD] Incomplete mosque data for user ${userId}:`, user.mosque); return sendError(res, 500, 'Moskee informatie ontbreekt.', null, req); }
     const newTempPassword = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 4).toUpperCase() + '!';
-    const newPasswordHash = await bcrypt.hash(newTempPassword, 10);
-
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ password_hash: newPasswordHash, is_temporary_password: true, updated_at: new Date() })
-      .eq('id', userId);
-
-    if (updateError) {
-      console.error(`[SEND NEW PWD] Error updating password for user ${userId}:`, updateError.message);
-      return sendError(res, 500, 'Kon wachtwoord niet updaten in database.', updateError.message, req);
-    }
-    console.log(`[SEND NEW PWD] Password updated in DB for user ${userId}. New temp password: ${newTempPassword}`);
-
-    if (!user.mosque.m365_configured) {
-        console.warn(`[SEND NEW PWD] M365 not configured for mosque ${user.mosque.name}. Password updated, but no email sent for user ${user.email}.`);
-        return res.json({ 
-            success: true, 
-            message: `Wachtwoord succesvol gereset voor ${user.name}. M365 is niet geconfigureerd voor deze moskee, dus er is GEEN e-mail verzonden. Het nieuwe tijdelijke wachtwoord is: ${newTempPassword}`,
-            newPasswordForManualDelivery: newTempPassword 
-        });
-    }
     
-    const mosqueName = user.mosque.name;
-    const mosqueSubdomain = user.mosque.subdomain;
-    const loginLink = `https://${mosqueSubdomain}.mijnlvs.nl`;
-    const emailSubject = `Nieuw wachtwoord voor uw ${mosqueName} account`;
-    const emailBody = `
-        <!DOCTYPE html><html lang="nl"><head><meta charset="UTF-8"><title>${emailSubject}</title></head><body>
-            <p>Beste ${user.name},</p>
-            <p>Op uw verzoek (of dat van een beheerder) is er een nieuw tijdelijk wachtwoord ingesteld voor uw account bij ${mosqueName}.</p>
-            <p>U kunt nu inloggen met de volgende gegevens:</p><ul><li><strong>E-mailadres:</strong> ${user.email}</li><li><strong>Nieuw tijdelijk wachtwoord:</strong> ${newTempPassword}</li></ul>
-            <p>Wij adviseren u dringend om uw wachtwoord direct na de eerste keer inloggen te wijzigen via uw profielpagina.</p>
-            <p>U kunt inloggen via: <a href="${loginLink}">${loginLink}</a>.</p><br>
-            <p>Met vriendelijke groet,</p><p>Het bestuur van ${mosqueName}</p>
-        </body></html>`;
-
-    const emailResult = await sendM365EmailInternal({
-        to: user.email, subject: emailSubject, body: emailBody, mosqueId: user.mosque_id,
-        emailType: `m365_new_temp_password_${user.role}` 
-    });
-
-    if (emailResult.success) {
-        console.log(`[SEND NEW PWD] New password email successfully sent to ${user.email}.`);
-        res.json({ success: true, message: `Nieuw tijdelijk wachtwoord succesvol verzonden naar ${user.name} (${user.email}).` });
-    } else {
-        console.error(`[SEND NEW PWD] Failed to send new password email to ${user.email}: ${emailResult.error}`, emailResult.details);
-        return res.status(500).json({
-            success: false, 
-            error: `Wachtwoord wel gereset, maar e-mail kon niet worden verzonden: ${emailResult.error || 'Onbekende e-mailfout'}. Het nieuwe tijdelijke wachtwoord is: ${newTempPassword}`, 
-            details: { newPasswordForManualDelivery: newTempPassword }
-        });
+    const { error: updateAuthError } = await supabase.auth.admin.updateUserById(userId, { password: newTempPassword });
+    if (updateAuthError) { console.error(`[SEND NEW PWD] Error updating Supabase Auth password for user ${userId}:`, updateAuthError.message); return sendError(res, 500, 'Kon wachtwoord in authenticatiesysteem niet updaten.', updateAuthError.message, req); }
+    
+    const newPasswordHash = await bcrypt.hash(newTempPassword, 10);
+    const { error: updateAppUserError } = await supabase.from('users').update({ password_hash: newPasswordHash, is_temporary_password: true, updated_at: new Date() }).eq('id', userId);
+    if (updateAppUserError) { console.error(`[SEND NEW PWD] Error updating app user password for user ${userId}:`, updateAppUserError.message); return sendError(res, 500, 'Kon wachtwoord in applicatiedatabase niet updaten.', updateAppUserError.message, req); }
+    
+    console.log(`[SEND NEW PWD] Password updated in DB & Auth for user ${userId}.`);
+    if (!user.mosque.m365_configured) {
+        console.warn(`[SEND NEW PWD] M365 not configured for mosque ${user.mosque.name}. Email NOT sent for ${user.email}.`);
+        return res.json({ success: true, message: `Wachtwoord gereset. M365 niet geconfigureerd, GEEN email verzonden. Nieuw wachtwoord: ${newTempPassword}`, newPasswordForManualDelivery: newTempPassword });
     }
-  } catch (error) {
-    console.error(`[SEND NEW PWD] Unexpected error for user ID ${userId}:`, error);
-    sendError(res, 500, 'Onverwachte serverfout bij het versturen van een nieuw wachtwoord.', error.message, req);
-  }
+    const mosqueName = user.mosque.name; const mosqueSubdomain = user.mosque.subdomain; const loginLink = `https://${mosqueSubdomain}.mijnlvs.nl`;
+    const emailSubject = `Nieuw wachtwoord voor uw ${mosqueName} account`;
+    const emailBody = `<!DOCTYPE html><html lang="nl"><head><meta charset="UTF-8"><title>${emailSubject}</title></head><body><p>Beste ${user.name},</p><p>Een nieuw tijdelijk wachtwoord is ingesteld voor uw account bij ${mosqueName}.</p><p>Inloggegevens:</p><ul><li><strong>E-mailadres:</strong> ${user.email}</li><li><strong>Nieuw tijdelijk wachtwoord:</strong> ${newTempPassword}</li></ul><p>Wijzig uw wachtwoord na inloggen.</p><p>Login via: <a href="${loginLink}">${loginLink}</a>.</p><br><p>Met vriendelijke groet,</p><p>Bestuur ${mosqueName}</p></body></html>`;
+    const emailResult = await sendM365EmailInternal({ to: user.email, subject: emailSubject, body: emailBody, mosqueId: user.mosque_id, emailType: `m365_new_temp_password_${user.role}` });
+    if (emailResult.success) { res.json({ success: true, message: `Nieuw tijdelijk wachtwoord verzonden naar ${user.name} (${user.email}).` }); } 
+    else { return res.status(500).json({ success: false, error: `Wachtwoord gereset, maar emailfout: ${emailResult.error || 'Onbekend'}. Nieuw wachtwoord: ${newTempPassword}`, details: { newPasswordForManualDelivery: newTempPassword }}); }
+  } catch (error) { console.error(`[SEND NEW PWD] Unexpected error for user ID ${userId}:`, error); sendError(res, 500, 'Onverwachte serverfout.', error.message, req); }
 });
 
 
@@ -777,187 +736,116 @@ const isUserAuthorized = (req, requiredRole = null, targetMosqueId = null, targe
 
 // --- LESSEN ---
 app.get('/api/mosques/:mosqueId/classes/:classId/lessons', async (req, res) => {
-    const { mosqueId, classId } = req.params;
-    const { startDate, endDate } = req.query;
-    console.log(`[API GET Lessons] For Mosque: ${mosqueId}, Class: ${classId}, Start: ${startDate}, End: ${endDate}`);
-
-    // Voorbeeld autorisatie: Leraar van de klas of Admin van de moskee
-    // if (!isUserAuthorized(req, null, mosqueId, classId)) { // 'null' voor rol betekent elke ingelogde user van de moskee, of specifieker
-    //     return sendError(res, 403, "Geen toegang tot deze lessen.", null, req);
-    // }
-
+    const { mosqueId, classId } = req.params; const { startDate, endDate } = req.query;
+    if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
+    if (req.user.mosque_id !== mosqueId && req.user.role !== 'superadmin') return sendError(res, 403, "Geen toegang tot data van deze moskee.", null, req);
+    // TODO: Verfijn: mag deze leraar/admin deze specifieke klas zien?
+    console.log(`[API GET Lessons] User: ${req.user.id}, For Mosque: ${mosqueId}, Class: ${classId}`);
     try {
-        let query = supabase
-            .from('lessen')
-            .select(`id, les_datum, les_dag_van_week, start_tijd, eind_tijd, onderwerp, notities_les, is_geannuleerd, klas_id, klas:klas_id (name)`)
-            .eq('moskee_id', mosqueId)
-            .eq('klas_id', classId);
-
-        if (startDate) query = query.gte('les_datum', startDate);
-        if (endDate) query = query.lte('les_datum', endDate);
-        query = query.order('les_datum', { ascending: true });
-
-        const { data, error } = await query;
-        if (error) throw error;
-        console.log(`[API GET Lessons] Successfully fetched ${data ? data.length : 0} lessons.`);
-        res.json(data);
-    } catch (error) {
-        sendError(res, 500, 'Fout bij ophalen lessen.', error.message, req);
-    }
+        let query = supabase.from('lessen').select(`id, les_datum, les_dag_van_week, start_tijd, eind_tijd, onderwerp, notities_les, is_geannuleerd, klas_id, klas:klas_id (name)`).eq('moskee_id', mosqueId).eq('klas_id', classId);
+        if (startDate) query = query.gte('les_datum', startDate); if (endDate) query = query.lte('les_datum', endDate);
+        query = query.order('les_datum', { ascending: true }); const { data, error } = await query;
+        if (error) throw error; res.json(data);
+    } catch (error) { sendError(res, 500, 'Fout bij ophalen lessen.', error.message, req); }
 });
 
 app.get('/api/lessen/:lessonId/details-for-attendance', async (req, res) => {
-    const { lessonId } = req.params;
+    const { lessonId } = req.params; if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     try {
-        const { data: lesson, error: lessonError } = await supabase
-            .from('lessen')
-            .select(`id, les_datum, onderwerp, is_geannuleerd, moskee_id, klas_id, klas:klas_id (id, name, students:students (id, name, active))`)
-            .eq('id', lessonId)
-            .single();
-        if (lessonError) throw lessonError;
-        if (!lesson) return sendError(res, 404, "Les niet gevonden.", null, req);
-        // if (!isUserAuthorized(req, 'teacher', lesson.moskee_id, lesson.klas_id)) return sendError(res, 403, "Geen toegang.");
-        if (lesson.klas && lesson.klas.students) {
-            lesson.klas.students = lesson.klas.students.filter(s => s.active);
-        }
-        res.json(lesson);
-    } catch (error) {
-        sendError(res, 500, 'Fout bij ophalen lesdetails.', error.message, req);
-    }
+        const { data: lesson, error: lessonError } = await supabase.from('lessen').select(`id, les_datum, onderwerp, is_geannuleerd, moskee_id, klas_id, klas:klas_id (id, name, students:students (id, name, active))`).eq('id', lessonId).single();
+        if (lessonError) throw lessonError; if (!lesson) return sendError(res, 404, "Les niet gevonden.", null, req);
+        if (req.user.mosque_id !== lesson.moskee_id && req.user.role !== 'superadmin') return sendError(res, 403, "Geen toegang tot deze lesdetails.", null, req);
+        // TODO: Verfijn: is req.user de leraar van lesson.klas_id of een admin?
+        if (lesson.klas && lesson.klas.students) lesson.klas.students = lesson.klas.students.filter(s => s.active); res.json(lesson);
+    } catch (error) { sendError(res, 500, 'Fout bij ophalen lesdetails.', error.message, req); }
 });
 
 app.post('/api/mosques/:mosqueId/classes/:classId/lessons', async (req, res) => {
-    const { mosqueId, classId } = req.params;
-    const { les_datum, onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd = false } = req.body;
-    // if (!isUserAuthorized(req, 'teacher', mosqueId, classId)) return sendError(res, 403, "Niet geautoriseerd.");
+    const { mosqueId, classId } = req.params; const { les_datum, onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd = false } = req.body;
     if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
-
-
+    if ((req.user.mosque_id !== mosqueId && req.user.role !== 'superadmin') || (req.user.role !== 'admin' && req.user.role !== 'teacher')) return sendError(res, 403, "Niet geautoriseerd om lessen aan te maken.", null, req);
+    // TODO: Als rol 'teacher' is, check of req.user.id de teacher_id is van classId.
     if (!les_datum) return sendError(res, 400, "Les datum is verplicht.", null, req);
     try {
         const { data: existingLesson, error: checkError } = await supabase.from('lessen').select('id').eq('klas_id', classId).eq('les_datum', les_datum).maybeSingle();
         if (checkError && checkError.code !== 'PGRST116') { throw checkError; }
-        if (existingLesson) return sendError(res, 409, `Er bestaat al een les voor klas op ${les_datum}. Les ID: ${existingLesson.id}`, { existingLessonId: existingLesson.id }, req);
-
-        const lesData = {
-            moskee_id: mosqueId, klas_id: classId, les_datum, onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd,
-            les_dag_van_week: new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' })
-        };
+        if (existingLesson) return sendError(res, 409, `Er bestaat al een les voor klas op ${les_datum}.`, { existingLessonId: existingLesson.id }, req);
+        const lesData = { moskee_id: mosqueId, klas_id: classId, les_datum, onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd, les_dag_van_week: new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' }) };
         const { data: newLesson, error } = await supabase.from('lessen').insert(lesData).select().single();
-        if (error) throw error;
-        res.status(201).json({ success: true, message: 'Les aangemaakt.', data: newLesson });
-    } catch (error) {
-        sendError(res, 500, 'Fout bij aanmaken les.', error.message, req);
-    }
+        if (error) throw error; res.status(201).json({ success: true, message: 'Les aangemaakt.', data: newLesson });
+    } catch (error) { sendError(res, 500, 'Fout bij aanmaken les.', error.message, req); }
 });
 
 app.put('/api/lessen/:lessonId', async (req, res) => {
-    const { lessonId } = req.params;
-    const { onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd, les_datum } = req.body;
+    const { lessonId } = req.params; const { onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd, les_datum } = req.body;
+    if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     try {
         const { data: lessonToUpdate, error: fetchError } = await supabase.from('lessen').select('klas_id, moskee_id').eq('id', lessonId).single();
         if (fetchError || !lessonToUpdate) return sendError(res, 404, "Les niet gevonden.", null, req);
-        // if (!isUserAuthorized(req, 'teacher', lessonToUpdate.moskee_id, lessonToUpdate.klas_id)) return sendError(res, 403, "Niet geautoriseerd.");
-        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
-
-
+        if ((req.user.mosque_id !== lessonToUpdate.moskee_id && req.user.role !== 'superadmin') || (req.user.role !== 'admin' && req.user.role !== 'teacher')) return sendError(res, 403, "Niet geautoriseerd om deze les te bewerken.", null, req);
+        // TODO: Als rol 'teacher' is, check of req.user.id de leraar is van de klas (lessonToUpdate.klas_id).
         const updateData = { onderwerp, notities_les, start_tijd, eind_tijd, is_geannuleerd, les_datum, gewijzigd_op: new Date() };
         if (les_datum) updateData.les_dag_van_week = new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' });
         Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
-
         const { data, error } = await supabase.from('lessen').update(updateData).eq('id', lessonId).select().single();
-        if (error) throw error;
-        res.json({ success: true, message: 'Les bijgewerkt.', data });
-    } catch (error) {
-        sendError(res, 500, 'Fout bij bijwerken les.', error.message, req);
-    }
+        if (error) throw error; res.json({ success: true, message: 'Les bijgewerkt.', data });
+    } catch (error) { sendError(res, 500, 'Fout bij bijwerken les.', error.message, req); }
 });
 
 // --- ABSENTIE REGISTRATIES ---
 app.post('/api/lessen/:lessonId/absenties', async (req, res) => {
-    const { lessonId } = req.params;
-    const absentieDataArray = req.body;
-    const leraarId = req.user ? req.user.id : null;
-
-    if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
+    const { lessonId } = req.params; const absentieDataArray = req.body;
+    if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req); const leraarIdDieOpslaat = req.user.id; 
     if (!Array.isArray(absentieDataArray)) return sendError(res, 400, "Absentie data moet een array zijn.", null, req);
-    
     try {
         const { data: lesInfo, error: lesError } = await supabase.from('lessen').select('id, moskee_id, klas_id').eq('id', lessonId).single();
         if (lesError || !lesInfo) return sendError(res, 404, "Les niet gevonden.", lesError ? lesError.message : null, req);
-        // if (!isUserAuthorized(req, 'teacher', lesInfo.moskee_id, lesInfo.klas_id)) return sendError(res, 403, "Niet geautoriseerd.");
-
-        const recordsToUpsert = absentieDataArray.map(item => ({
-            les_id: lessonId, leerling_id: item.leerling_id, moskee_id: lesInfo.moskee_id,
-            status: item.status, notities_absentie: item.notities_absentie,
-            geregistreerd_door_leraar_id: leraarId, registratie_datum_tijd: new Date()
-        }));
-        const { data, error: upsertError } = await supabase.from('absentie_registraties').upsert(recordsToUpsert, { onConflict: 'les_id, leerling_id' })
-            .select(`id, status, notities_absentie, leerling_id, leerling:leerling_id (name)`);
-        if (upsertError) throw upsertError;
-        res.status(200).json({ success: true, message: 'Absenties opgeslagen.', data });
-    } catch (error) {
-        sendError(res, 500, `Fout bij opslaan absenties.`, error.message, req);
-    }
+        if ((req.user.mosque_id !== lesInfo.moskee_id && req.user.role !== 'superadmin') || (req.user.role !== 'admin' && req.user.role !== 'teacher')) return sendError(res, 403, "Niet geautoriseerd om absenties op te slaan.", null, req);
+        // TODO: Als rol 'teacher' is, check of req.user.id de leraar is van de klas (lesInfo.klas_id).
+        const recordsToUpsert = absentieDataArray.map(item => ({ les_id: lessonId, leerling_id: item.leerling_id, moskee_id: lesInfo.moskee_id, status: item.status, notities_absentie: item.notities_absentie, geregistreerd_door_leraar_id: leraarIdDieOpslaat, registratie_datum_tijd: new Date() }));
+        const { data, error: upsertError } = await supabase.from('absentie_registraties').upsert(recordsToUpsert, { onConflict: 'les_id, leerling_id' }).select(`id, status, notities_absentie, leerling_id, leerling:leerling_id (name)`);
+        if (upsertError) throw upsertError; res.status(200).json({ success: true, message: 'Absenties opgeslagen.', data });
+    } catch (error) { sendError(res, 500, `Fout bij opslaan absenties.`, error.message, req); }
 });
 
 app.get('/api/lessen/:lessonId/absenties', async (req, res) => {
-    const { lessonId } = req.params;
+    const { lessonId } = req.params; if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     try {
         const { data: lesInfo, error: lesFetchError } = await supabase.from('lessen').select('moskee_id, klas_id').eq('id', lessonId).single();
-        if (lesFetchError || !lesInfo) return sendError(res, 404, "Les niet gevonden om absenties op te halen.", null, req);
-        // if (!isUserAuthorized(req, null, lesInfo.moskee_id, lesInfo.klas_id)) return sendError(res, 403, "Geen toegang.");
-        
-        const { data, error } = await supabase.from('absentie_registraties')
-            .select(`id, status, notities_absentie, registratie_datum_tijd, leerling_id, leerling:leerling_id ( name ), geregistreerd_door_leraar_id, leraar:geregistreerd_door_leraar_id ( name )`)
-            .eq('les_id', lessonId);
-        if (error) throw error;
-        res.json(data);
-    } catch (error) {
-        sendError(res, 500, 'Fout bij ophalen absenties voor les.', error.message, req);
-    }
+        if (lesFetchError || !lesInfo) return sendError(res, 404, "Les niet gevonden.", null, req);
+        if (req.user.mosque_id !== lesInfo.moskee_id && req.user.role !== 'superadmin') return sendError(res, 403, "Geen toegang.", null, req);
+        // TODO: Verfijn autorisatie: mag leraar/ouder dit zien?
+        const { data, error } = await supabase.from('absentie_registraties').select(`id, status, notities_absentie, registratie_datum_tijd, leerling_id, leerling:leerling_id ( name ), geregistreerd_door_leraar_id, leraar:geregistreerd_door_leraar_id ( name )`).eq('les_id', lessonId);
+        if (error) throw error; res.json(data);
+    } catch (error) { sendError(res, 500, 'Fout bij ophalen absenties voor les.', error.message, req); }
 });
 
 app.get('/api/leerlingen/:studentId/absentiehistorie', async (req, res) => {
-    const { studentId } = req.params;
-    const { startDate, endDate, limit = 50 } = req.query;
+    const { studentId } = req.params; const { startDate, endDate, limit = 50 } = req.query;
+    if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     try {
-        // TODO: Verfijn autorisatie: ouder van student, leraar van klas van student, of admin van moskee.
-        // const {data: studentInfo} = await supabase.from('students').select('mosque_id, class_id, parent_id').eq('id', studentId).single();
-        // if (!studentInfo) return sendError(res, 404, "Leerling niet gevonden.", null, req);
-        // if (!isUserAuthorized(req, null, studentInfo.mosque_id, studentInfo.class_id)) { /* check ook parent_id */ }
-
-        let query = supabase.from('absentie_registraties')
-            .select(`id, status, notities_absentie, registratie_datum_tijd, les:les_id ( les_datum, onderwerp, is_geannuleerd, klas:klas_id (name) )`)
-            .eq('leerling_id', studentId)
-            .order('les_datum', { foreignTable: 'lessen', ascending: false })
-            .limit(parseInt(limit, 10));
-
-        if (startDate || endDate) {
-            const studentMosqueId = req.user?.mosque_id; // Dit moet de moskee_id van de leerling zijn.
-            if (!studentMosqueId && req.user?.role !== 'admin') { // Admin mag mogelijk breder kijken.
-                 // Probeer moskee_id van student op te halen als niet via req.user
-                 const {data: stud} = await supabase.from('students').select('mosque_id').eq('id', studentId).single();
-                 if (!stud?.mosque_id) return sendError(res, 400, "Kon moskee ID voor student niet bepalen.", null, req);
-                 // studentMosqueId = stud.mosque_id; // Dit is nu niet gezet in deze scope.
+        const {data: studentInfo, error: studentInfoError} = await supabase.from('students').select('mosque_id, parent_id, class_id').eq('id', studentId).single();
+        if(studentInfoError || !studentInfo) return sendError(res, 404, "Leerling niet gevonden.", null, req);
+        let authorized = false;
+        if (req.user.role === 'superadmin') authorized = true;
+        else if (req.user.mosque_id === studentInfo.mosque_id) { // Moet van dezelfde moskee zijn
+            if (req.user.role === 'admin') authorized = true;
+            else if (req.user.role === 'parent' && req.user.id === studentInfo.parent_id) authorized = true;
+            else if (req.user.role === 'teacher') { 
+                const {data: klasInfo} = await supabase.from('classes').select('teacher_id').eq('id', studentInfo.class_id).single(); 
+                if (klasInfo && klasInfo.teacher_id === req.user.id) authorized = true; 
             }
-            // Bovenstaande logica voor studentMosqueId is complex en moet goed. Voor nu, aanname dat req.user.mosque_id ok is voor test.
-
-            const { data: lessonsInRange, error: lessonsError } = await supabase.from('lessen')
-                .select('id')
-                // .eq('moskee_id', studentMosqueId) // Scope op moskee van de leerling/context
-                .gte('les_datum', startDate || '1900-01-01').lte('les_datum', endDate || '2999-12-31');
-            if (lessonsError) throw lessonsError;
-            const lessonIdsInRange = lessonsInRange.map(l => l.id);
-            if (lessonIdsInRange.length > 0) query = query.in('les_id', lessonIdsInRange);
-            else return res.json([]);
         }
-        const { data, error } = await query;
-        if (error) throw error;
-        res.json(data);
-    } catch (error) {
-        sendError(res, 500, 'Fout bij ophalen absentiehistorie leerling.', error.message, req);
-    }
+        if (!authorized) return sendError(res, 403, "Niet geautoriseerd om deze absentiehistorie te bekijken.", null, req);
+        
+        let query = supabase.from('absentie_registraties').select(`id, status, notities_absentie, registratie_datum_tijd, les:les_id ( les_datum, onderwerp, is_geannuleerd, klas:klas_id (name) )`).eq('leerling_id', studentId).order('les_datum', { foreignTable: 'lessen', ascending: false }).limit(parseInt(limit, 10));
+        if (startDate || endDate) {
+            const { data: lessonsInRange, error: lessonsError } = await supabase.from('lessen').select('id').eq('moskee_id', studentInfo.mosque_id).gte('les_datum', startDate || '1900-01-01').lte('les_datum', endDate || '2999-12-31');
+            if (lessonsError) throw lessonsError; const lessonIdsInRange = lessonsInRange.map(l => l.id);
+            if (lessonIdsInRange.length > 0) query = query.in('les_id', lessonIdsInRange); else return res.json([]);
+        }
+        const { data, error } = await query; if (error) throw error; res.json(data);
+    } catch (error) { sendError(res, 500, 'Fout bij ophalen absentiehistorie leerling.', error.message, req); }
 });
 // ==================================
 // EINDE LESSEN & ABSENTIE ROUTES
@@ -1109,6 +997,7 @@ app.get('/api/config-check', (req, res) => {
 });
 
 // Catch all undefined routes
+// Catch all undefined routes
 app.use('*', (req, res) => {
   sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
@@ -1118,7 +1007,7 @@ app.use('*', (req, res) => {
       'GET /api/mosques/:mosqueId/classes','GET /api/classes/:id', 'POST /api/classes', 'PUT /api/classes/:id', 'DELETE /api/classes/:id',
       'GET /api/mosques/:mosqueId/students','GET /api/students/:id', 'POST /api/students', 'PUT /api/students/:id', 'DELETE /api/students/:id',
       'GET /api/mosques/:mosqueId/payments','GET /api/payments/:id', 'POST /api/payments', 'PUT /api/payments/:id', 'DELETE /api/payments/:id',
-      // NIEUWE ROUTES HIER TOEGEVOEGD:
+      // Zorg dat deze erin staan:
       'GET /api/mosques/:mosqueId/classes/:classId/lessons',
       'GET /api/lessen/:lessonId/details-for-attendance',
       'POST /api/mosques/:mosqueId/classes/:classId/lessons',
