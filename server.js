@@ -1040,6 +1040,148 @@ app.get('/api/leerlingen/:studentId/absentiehistorie', async (req, res) => {
         const { data, error } = await query; if (error) throw error; res.json(data);
     } catch (error) { sendError(res, 500, 'Fout bij ophalen absentiehistorie leerling.', error.message, req); }
 });
+// Voeg deze endpoint toe aan je server.js - plaats het bij de andere absentie routes
+
+// POST absentie statistieken voor specifieke leerlingen (voor ouders)
+app.post('/api/mosques/:mosqueId/students/attendance-stats', async (req, res) => {
+  try {
+    const { mosqueId } = req.params;
+    const { student_ids } = req.body;
+
+    if (!student_ids || !Array.isArray(student_ids) || student_ids.length === 0) {
+      return sendError(res, 400, 'student_ids array is required', null, req);
+    }
+
+    // Controleer authenticatie
+    if (!req.user) {
+      return sendError(res, 401, "Authenticatie vereist.", null, req);
+    }
+
+    // Controleer of de gebruiker toegang heeft tot deze moskee
+    if (req.user.mosque_id !== mosqueId) {
+      return sendError(res, 403, 'Geen toegang tot deze moskee', null, req);
+    }
+
+    // Voor ouders: controleer of ze alleen hun eigen kinderen opvragen
+    if (req.user.role === 'parent') {
+      const { data: userStudents, error: studentsError } = await supabase
+        .from('students')
+        .select('id')
+        .eq('parent_id', req.user.id)
+        .eq('mosque_id', mosqueId);
+
+      if (studentsError) throw studentsError;
+
+      const userStudentIds = userStudents.map(s => s.id);
+      const unauthorizedIds = student_ids.filter(id => !userStudentIds.includes(id));
+      
+      if (unauthorizedIds.length > 0) {
+        return sendError(res, 403, 'Geen toegang tot alle opgevraagde leerlingen', null, req);
+      }
+    }
+
+    // Haal absentie statistieken op met SQL aggregatie query
+    const { data: attendanceData, error: attendanceError } = await supabase
+      .from('absentie_registraties')
+      .select(`
+        leerling_id,
+        status
+      `)
+      .eq('moskee_id', mosqueId)
+      .in('leerling_id', student_ids);
+
+    if (attendanceError) throw attendanceError;
+
+    // Verwerk de data tot statistieken per leerling
+    const stats = {};
+    
+    // Initialiseer statistieken voor elke leerling
+    student_ids.forEach(studentId => {
+      stats[studentId] = {
+        aanwezig: 0,
+        afwezig_ongeoorloofd: 0,
+        afwezig_geoorloofd: 0,
+        te_laat: 0
+      };
+    });
+
+    // Tel de verschillende statussen
+    attendanceData.forEach(record => {
+      const studentId = record.leerling_id;
+      const status = record.status;
+      
+      if (stats[studentId] && stats[studentId].hasOwnProperty(status)) {
+        stats[studentId][status]++;
+      }
+    });
+
+    console.log(`[API] Attendance stats computed for ${Object.keys(stats).length} students`);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('[API] Error fetching attendance stats:', error);
+    sendError(res, 500, 'Fout bij ophalen van absentie statistieken', error.message, req);
+  }
+});
+
+// Alternatieve endpoint voor meer gedetailleerde statistieken (optioneel)
+app.get('/api/mosques/:mosqueId/students/:studentId/attendance-history', async (req, res) => {
+  try {
+    const { mosqueId, studentId } = req.params;
+    const { limit = 50, offset = 0 } = req.query;
+
+    // Controleer authenticatie
+    if (!req.user) {
+      return sendError(res, 401, "Authenticatie vereist.", null, req);
+    }
+
+    // Controleer toegang
+    if (req.user.mosque_id !== mosqueId) {
+      return sendError(res, 403, 'Geen toegang tot deze moskee', null, req);
+    }
+
+    // Voor ouders: controleer of het hun kind is
+    if (req.user.role === 'parent') {
+      const { data: student, error: studentError } = await supabase
+        .from('students')
+        .select('parent_id')
+        .eq('id', studentId)
+        .eq('mosque_id', mosqueId)
+        .single();
+
+      if (studentError || !student || student.parent_id !== req.user.id) {
+        return sendError(res, 403, 'Geen toegang tot deze leerling', null, req);
+      }
+    }
+
+    // Haal gedetailleerde absentie geschiedenis op
+    const { data: attendanceHistory, error: historyError } = await supabase
+      .from('absentie_registraties')
+      .select(`
+        *,
+        lessen!inner (
+          les_datum,
+          onderwerp,
+          classes!inner (
+            name
+          )
+        )
+      `)
+      .eq('moskee_id', mosqueId)
+      .eq('leerling_id', studentId)
+      .order('registratie_datum_tijd', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (historyError) throw historyError;
+
+    console.log(`[API] Attendance history retrieved: ${attendanceHistory.length} records for student ${studentId}`);
+    res.json(attendanceHistory);
+
+  } catch (error) {
+    console.error('[API] Error fetching attendance history:', error);
+    sendError(res, 500, 'Fout bij ophalen van absentie geschiedenis', error.message, req);
+  }
+});
 // ==================================
 // EINDE LESSEN & ABSENTIE ROUTES
 // ==================================
