@@ -19,7 +19,7 @@
   "author": "Al-Hijra Moskee",
   "license": "MIT",
   "dependencies": {
-    "@supabase/supabase-js": "^2.50.0",
+    "@supabase/supabase-js": "^2.49.9",
     "axios": "^1.6.2",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
