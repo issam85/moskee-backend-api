@@ -1,23 +1,5 @@
 // server.js - Complete backend met Supabase database integratie
 // Versie: 2.2.8 - Productieklare Authenticatie + Les & Absentie (of je huidige versie)
-const fetch = require('node-fetch'); // Direct 'fetch' gebruiken
-// ...
-// Polyfill global.fetch als het nog niet bestaat, VOORDAT Supabase client wordt gemaakt
-if (typeof globalThis.fetch === 'undefined') {
-  globalThis.fetch = fetch;
-  // Als node-fetch v2 de Headers etc. niet direct op het 'fetch' object zet:
-  if (fetch.default) { // Sommige v2 setups via require doen dit
-      globalThis.Headers = fetch.default.Headers;
-      globalThis.Request = fetch.default.Request;
-      globalThis.Response = fetch.default.Response;
-  } else if (fetch.Headers) { // Andere v2 setups
-      globalThis.Headers = fetch.Headers;
-      globalThis.Request = fetch.Request;
-      globalThis.Response = fetch.Response;
-  }
-  console.log("Polyfilled globalThis.fetch with node-fetch v2.");
-}
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -27,9 +9,9 @@ const bcrypt = require('bcrypt');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Supabase initialization
+// Supabase initialization - VERBETERDE VERSIE
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY; 
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
 console.log("🚦 [INIT] Attempting to initialize Supabase client...");
 console.log("🚦 [INIT] Using SUPABASE_URL:", supabaseUrl);
@@ -39,31 +21,82 @@ if (!supabaseUrl || !supabaseKey) {
   console.error("❌ FATAL: SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables are required.");
   process.exit(1);
 }
-let supabase;
-try {
-  // Log de key die gebruikt wordt voor initialisatie
-  console.log("[INIT PRE-CREATE] Attempting Supabase client creation with key (first 10 chars of supabaseKey var):", supabaseKey ? supabaseKey.substring(0, 10) + "..." : "KEY NOT SET in supabaseKey var");
-  supabase = createClient(supabaseUrl, supabaseKey);
-  console.log("✅ [INIT POST-CREATE] Supabase client object created."); // Basis check of supabase object zelf bestaat
 
-  // Directe check na creatie
-  if (supabase && supabase.auth && supabase.auth.admin) {
-      console.log("✅ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS available.");
-      console.log("✅ [INIT POST-CREATE DEBUG] Type of supabase.auth.admin.getUserByEmail:", typeof supabase.auth.admin.getUserByEmail);
-      // Log alle keys/methodes die beschikbaar zijn op supabase.auth.admin voor extra inzicht
-      console.log("✅ [INIT POST-CREATE DEBUG] Keys in supabase.auth.admin:", Object.keys(supabase.auth.admin).join(', '));
-  } else {
-      console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS NOT available.");
-      if (!supabase) console.error("❌ [INIT POST-CREATE DEBUG] supabase client is falsy.");
-      else if (!supabase.auth) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth is falsy.");
-      else if (!supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined.");
-  }
-} catch (initError) {
-  console.error("❌ FATAL: Supabase client initialization FAILED:", initError.message, initError);
-  console.error("Full initialization error object:", initError); // Log het volledige error object
+// Verificeer dat het een service_role key is (niet anon key)
+if (!supabaseKey.includes('eyJ') || supabaseKey.length < 100) {
+  console.error("❌ FATAL: SUPABASE_SERVICE_KEY lijkt niet geldig te zijn. Zorg dat je de service_role key gebruikt, niet de anon key.");
   process.exit(1);
 }
 
+let supabase;
+try {
+  console.log("[INIT PRE-CREATE] Attempting Supabase client creation with explicit admin configuration...");
+  
+  // Expliciete configuratie voor server-side gebruik met admin rechten
+  supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false
+    },
+    db: {
+      schema: 'public'
+    },
+    global: {
+      headers: {
+        'Authorization': `Bearer ${supabaseKey}`
+      }
+    }
+  });
+
+  console.log("✅ [INIT POST-CREATE] Supabase client object created.");
+
+  // Uitgebreide admin API check
+  console.log("🔍 [INIT DEBUG] Checking admin API availability...");
+  console.log("🔍 [INIT DEBUG] supabase object exists:", !!supabase);
+  console.log("🔍 [INIT DEBUG] supabase.auth exists:", !!(supabase && supabase.auth));
+  console.log("🔍 [INIT DEBUG] supabase.auth.admin exists:", !!(supabase && supabase.auth && supabase.auth.admin));
+  
+  if (supabase && supabase.auth && supabase.auth.admin) {
+    console.log("✅ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS available.");
+    console.log("✅ [INIT POST-CREATE DEBUG] Type of supabase.auth.admin.getUserByEmail:", typeof supabase.auth.admin.getUserByEmail);
+    console.log("✅ [INIT POST-CREATE DEBUG] Type of supabase.auth.admin.listUsers:", typeof supabase.auth.admin.listUsers);
+    console.log("✅ [INIT POST-CREATE DEBUG] Type of supabase.auth.admin.createUser:", typeof supabase.auth.admin.createUser);
+    
+    // Test de admin functies
+    console.log("🔍 [INIT DEBUG] Available admin methods:", Object.getOwnPropertyNames(supabase.auth.admin));
+    
+    // Kleine test call om te verifiëren dat admin API werkt
+    setTimeout(async () => {
+      try {
+        console.log("🧪 [INIT TEST] Testing admin.listUsers()...");
+        const { data, error } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1 });
+        if (error) {
+          console.error("❌ [INIT TEST] Admin test failed:", error.message);
+        } else {
+          console.log("✅ [INIT TEST] Admin API test successful. User count:", data.users?.length || 0);
+        }
+      } catch (testError) {
+        console.error("❌ [INIT TEST] Admin test exception:", testError.message);
+      }
+    }, 1000);
+    
+  } else {
+    console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS NOT available.");
+    if (!supabase) console.error("❌ [INIT POST-CREATE DEBUG] supabase client is falsy.");
+    else if (!supabase.auth) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth is falsy.");
+    else if (!supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined.");
+    
+    // Dit is een fatale fout - zonder admin API kunnen we niet functioneren
+    console.error("❌ FATAL: Supabase Admin API not available. Cannot continue.");
+    process.exit(1);
+  }
+  
+} catch (initError) {
+  console.error("❌ FATAL: Supabase client initialization FAILED:", initError.message, initError);
+  console.error("Full initialization error object:", initError);
+  process.exit(1);
+}
 async function testSupabaseConnection() {
   console.log("🚦 [DB STARTUP TEST] Attempting a simple query to Supabase...");
   // Voeg een check toe of supabase wel geinitialiseerd is voordat je het gebruikt
@@ -86,6 +119,7 @@ async function testSupabaseConnection() {
     console.error("Full error object from outer catch:", e);
   }
 }
+
 testSupabaseConnection();
 
 // Middleware
