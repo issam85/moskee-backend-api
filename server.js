@@ -87,9 +87,26 @@ try {
     else if (!supabase.auth) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth is falsy.");
     else if (!supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined.");
     
-    // Dit is een fatale fout - zonder admin API kunnen we niet functioneren
-    console.error("❌ FATAL: Supabase Admin API not available. Cannot continue.");
-    process.exit(1);
+    // BELANGRIJK: Voeg Supabase versie check toe
+    console.error("🔍 [VERSION CHECK] Checking Supabase version...");
+    try {
+      const packageJson = require('./package.json');
+      const supabaseVersion = packageJson.dependencies['@supabase/supabase-js'];
+      console.error("📦 [VERSION CHECK] package.json Supabase version:", supabaseVersion);
+    } catch (e) {
+      console.error("❌ [VERSION CHECK] Could not read package.json:", e.message);
+    }
+    
+    // Check welke versie daadwerkelijk geladen is
+    try {
+      const supabasePackage = require('@supabase/supabase-js/package.json');
+      console.error("📦 [VERSION CHECK] Actually loaded Supabase version:", supabasePackage.version);
+    } catch (e) {
+      console.error("❌ [VERSION CHECK] Could not read loaded Supabase version:", e.message);
+    }
+    
+    // GEEN process.exit(1) meer - laat de app draaien voor debugging
+    console.error("⚠️ [WARNING] Continuing without admin API - some features will not work!");
   }
   
 } catch (initError) {
@@ -97,6 +114,7 @@ try {
   console.error("Full initialization error object:", initError);
   process.exit(1);
 }
+
 async function testSupabaseConnection() {
   console.log("🚦 [DB STARTUP TEST] Attempting a simple query to Supabase...");
   // Voeg een check toe of supabase wel geinitialiseerd is voordat je het gebruikt
