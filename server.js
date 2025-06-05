@@ -1189,7 +1189,7 @@ app.get('/api/mosques/:mosqueId/students/:studentId/attendance-history', async (
 // Voeg deze endpoints toe aan je server.js
 
 // ===== LEERLING TOEVOEGEN DOOR LERAAR =====
-app.post('/api/mosques/:mosqueId/students', authenticateToken, async (req, res) => {
+app.post('/api/mosques/:mosqueId/students', async (req, res) => {
   try {
     const { mosqueId } = req.params;
     const { 
@@ -1285,7 +1285,7 @@ app.post('/api/mosques/:mosqueId/students', authenticateToken, async (req, res) 
 });
 
 // ===== QOR'AAN VOORTGANG OPHALEN =====
-app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', authenticateToken, async (req, res) => {
+app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req, res) => {
   try {
     const { mosqueId, studentId } = req.params;
     const userId = req.user.id;
@@ -1342,7 +1342,7 @@ app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', authenticat
 });
 
 // ===== QOR'AAN VOORTGANG BIJWERKEN =====
-app.post('/api/mosques/:mosqueId/students/:studentId/quran-progress', authenticateToken, async (req, res) => {
+app.post('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req, res) => {
   try {
     const { mosqueId, studentId } = req.params;
     const { 
@@ -1436,7 +1436,7 @@ app.post('/api/mosques/:mosqueId/students/:studentId/quran-progress', authentica
 });
 
 // ===== BULK QOR'AAN STATISTIEKEN VOOR OUDERS =====
-app.post('/api/mosques/:mosqueId/students/quran-stats', authenticateToken, async (req, res) => {
+app.post('/api/mosques/:mosqueId/students/quran-stats', async (req, res) => {
   try {
     const { mosqueId } = req.params;
     const { student_ids } = req.body;
@@ -1670,7 +1670,6 @@ app.use('*', (req, res) => {
       'GET /api/mosques/:mosqueId/classes','GET /api/classes/:id', 'POST /api/classes', 'PUT /api/classes/:id', 'DELETE /api/classes/:id',
       'GET /api/mosques/:mosqueId/students','GET /api/students/:id', 'POST /api/students', 'PUT /api/students/:id', 'DELETE /api/students/:id',
       'GET /api/mosques/:mosqueId/payments','GET /api/payments/:id', 'POST /api/payments', 'PUT /api/payments/:id', 'DELETE /api/payments/:id',
-      // Zorg dat deze erin staan:
       'GET /api/mosques/:mosqueId/classes/:classId/lessons',
       'GET /api/lessen/:lessonId/details-for-attendance',
       'POST /api/mosques/:mosqueId/classes/:classId/lessons',
@@ -1678,7 +1677,11 @@ app.use('*', (req, res) => {
       'POST /api/lessen/:lessonId/absenties',
       'GET /api/lessen/:lessonId/absenties',
       'GET /api/leerlingen/:studentId/absentiehistorie',
-      'POST /api/send-email-m365'
+      'POST /api/send-email-m365',
+      'POST /api/mosques/:mosqueId/students',
+      'GET /api/mosques/:mosqueId/students/:studentId/quran-progress', 
+      'POST /api/mosques/:mosqueId/students/:studentId/quran-progress',
+      'POST /api/mosques/:mosqueId/students/quran-stats'
   ]}, req);
 });
 
