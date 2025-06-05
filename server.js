@@ -1186,6 +1186,334 @@ app.get('/api/mosques/:mosqueId/students/:studentId/attendance-history', async (
 // EINDE LESSEN & ABSENTIE ROUTES
 // ==================================
 
+// Voeg deze endpoints toe aan je server.js
+
+// ===== LEERLING TOEVOEGEN DOOR LERAAR =====
+app.post('/api/mosques/:mosqueId/students', authenticateToken, async (req, res) => {
+  try {
+    const { mosqueId } = req.params;
+    const { 
+      name, 
+      class_id, 
+      date_of_birth, 
+      notes, 
+      parent_email, 
+      added_by_teacher_id,
+      active = true 
+    } = req.body;
+
+    console.log(`[POST /api/mosques/${mosqueId}/students] Teacher adding student:`, name);
+
+    // Validatie
+    if (!name || !class_id || !added_by_teacher_id) {
+      return res.status(400).json({ 
+        error: 'Naam, klas en leraar ID zijn verplicht' 
+      });
+    }
+
+    // Verificeer dat de leraar eigenaar is van de klas
+    const { data: classData, error: classError } = await supabase
+      .from('classes')
+      .select('id, name, teacher_id, mosque_id')
+      .eq('id', class_id)
+      .eq('mosque_id', mosqueId)
+      .single();
+
+    if (classError || !classData) {
+      return res.status(404).json({ error: 'Klas niet gevonden' });
+    }
+
+    if (String(classData.teacher_id) !== String(added_by_teacher_id)) {
+      return res.status(403).json({ 
+        error: 'U kunt alleen leerlingen toevoegen aan uw eigen klassen' 
+      });
+    }
+
+    // Zoek bestaande ouder op basis van email (optioneel)
+    let parent_id = null;
+    if (parent_email && parent_email.trim()) {
+      const { data: existingParent } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', parent_email.toLowerCase().trim())
+        .eq('role', 'parent')
+        .eq('mosque_id', mosqueId)
+        .single();
+      
+      if (existingParent) {
+        parent_id = existingParent.id;
+        console.log(`[ADD STUDENT] Found existing parent for email: ${parent_email}`);
+      }
+    }
+
+    // Voeg leerling toe
+    const { data: newStudent, error: studentError } = await supabase
+      .from('students')
+      .insert({
+        name: name.trim(),
+        class_id,
+        mosque_id: mosqueId,
+        parent_id,
+        date_of_birth: date_of_birth || null,
+        notes: notes?.trim() || null,
+        added_by_teacher_id,
+        active,
+        created_at: new Date()
+      })
+      .select('*')
+      .single();
+
+    if (studentError) {
+      console.error('[ADD STUDENT] Database error:', studentError);
+      return res.status(500).json({ 
+        error: 'Kon leerling niet toevoegen: ' + studentError.message 
+      });
+    }
+
+    console.log(`[ADD STUDENT] Student toegevoegd: ${newStudent.name} (ID: ${newStudent.id})`);
+
+    res.json({
+      success: true,
+      data: newStudent,
+      message: `Leerling ${newStudent.name} succesvol toegevoegd aan ${classData.name}`
+    });
+
+  } catch (error) {
+    console.error('[ADD STUDENT] Error:', error);
+    res.status(500).json({ error: 'Server fout bij toevoegen leerling' });
+  }
+});
+
+// ===== QOR'AAN VOORTGANG OPHALEN =====
+app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', authenticateToken, async (req, res) => {
+  try {
+    const { mosqueId, studentId } = req.params;
+    const userId = req.user.id;
+
+    console.log(`[GET Quran Progress] User ${userId} requesting progress for student ${studentId}`);
+
+    // Verificeer toegang: leraar van klas OF ouder van student
+    const { data: student, error: studentError } = await supabase
+      .from('students')
+      .select(`
+        id, 
+        name, 
+        parent_id,
+        class_id,
+        classes!inner(teacher_id)
+      `)
+      .eq('id', studentId)
+      .eq('mosque_id', mosqueId)
+      .single();
+
+    if (studentError || !student) {
+      return res.status(404).json({ error: 'Leerling niet gevonden' });
+    }
+
+    // Check autorisatie
+    const isTeacher = String(student.classes.teacher_id) === String(userId);
+    const isParent = String(student.parent_id) === String(userId);
+
+    if (!isTeacher && !isParent) {
+      return res.status(403).json({ 
+        error: 'Geen toegang tot voortgang van deze leerling' 
+      });
+    }
+
+    // Haal Qor'aan voortgang op
+    const { data: progress, error: progressError } = await supabase
+      .from('quran_progress')
+      .select('*')
+      .eq('student_id', studentId)
+      .order('soerah_number', { ascending: true });
+
+    if (progressError) {
+      console.error('[GET Quran Progress] Database error:', progressError);
+      return res.status(500).json({ error: 'Kon voortgang niet laden' });
+    }
+
+    console.log(`[GET Quran Progress] Found ${progress?.length || 0} progress records for student ${studentId}`);
+    res.json(progress || []);
+
+  } catch (error) {
+    console.error('[GET Quran Progress] Error:', error);
+    res.status(500).json({ error: 'Server fout bij laden voortgang' });
+  }
+});
+
+// ===== QOR'AAN VOORTGANG BIJWERKEN =====
+app.post('/api/mosques/:mosqueId/students/:studentId/quran-progress', authenticateToken, async (req, res) => {
+  try {
+    const { mosqueId, studentId } = req.params;
+    const { 
+      soerah_number, 
+      soerah_name, 
+      status, 
+      updated_by_teacher_id, 
+      notes 
+    } = req.body;
+    const userId = req.user.id;
+
+    console.log(`[UPDATE Quran Progress] Teacher ${userId} updating soerah ${soerah_number} for student ${studentId} to status: ${status}`);
+
+    // Validatie
+    if (!soerah_number || !soerah_name || !status) {
+      return res.status(400).json({ 
+        error: 'Soerah nummer, naam en status zijn verplicht' 
+      });
+    }
+
+    if (!['niet_begonnen', 'bezig', 'voltooid', 'herhaling'].includes(status)) {
+      return res.status(400).json({ error: 'Ongeldige status' });
+    }
+
+    // Verificeer dat leraar toegang heeft tot deze leerling
+    const { data: student, error: studentError } = await supabase
+      .from('students')
+      .select(`
+        id, 
+        name, 
+        class_id,
+        classes!inner(teacher_id)
+      `)
+      .eq('id', studentId)
+      .eq('mosque_id', mosqueId)
+      .single();
+
+    if (studentError || !student) {
+      return res.status(404).json({ error: 'Leerling niet gevonden' });
+    }
+
+    if (String(student.classes.teacher_id) !== String(userId)) {
+      return res.status(403).json({ 
+        error: 'U kunt alleen voortgang bijwerken voor leerlingen in uw eigen klassen' 
+      });
+    }
+
+    // Bepaal date_completed
+    let date_completed = null;
+    if (status === 'voltooid') {
+      date_completed = new Date().toISOString().split('T')[0]; // Vandaag
+    }
+
+    // UPSERT: Update bestaand record of maak nieuw aan
+    const { data: updatedProgress, error: progressError } = await supabase
+      .from('quran_progress')
+      .upsert({
+        student_id: studentId,
+        soerah_number: parseInt(soerah_number),
+        soerah_name: soerah_name.trim(),
+        status,
+        date_completed,
+        notes: notes?.trim() || null,
+        updated_by_teacher_id: userId,
+        updated_at: new Date()
+      }, {
+        onConflict: 'student_id,soerah_number'
+      })
+      .select('*')
+      .single();
+
+    if (progressError) {
+      console.error('[UPDATE Quran Progress] Database error:', progressError);
+      return res.status(500).json({ 
+        error: 'Kon voortgang niet bijwerken: ' + progressError.message 
+      });
+    }
+
+    console.log(`[UPDATE Quran Progress] Updated soerah ${soerah_number} for student ${student.name} to ${status}`);
+
+    res.json({
+      success: true,
+      data: updatedProgress,
+      message: `Voortgang bijgewerkt: ${soerah_name} - ${status}`
+    });
+
+  } catch (error) {
+    console.error('[UPDATE Quran Progress] Error:', error);
+    res.status(500).json({ error: 'Server fout bij bijwerken voortgang' });
+  }
+});
+
+// ===== BULK QOR'AAN STATISTIEKEN VOOR OUDERS =====
+app.post('/api/mosques/:mosqueId/students/quran-stats', authenticateToken, async (req, res) => {
+  try {
+    const { mosqueId } = req.params;
+    const { student_ids } = req.body;
+    const userId = req.user.id;
+
+    console.log(`[GET Quran Stats] Parent ${userId} requesting stats for ${student_ids?.length || 0} students`);
+
+    if (!student_ids || !Array.isArray(student_ids) || student_ids.length === 0) {
+      return res.status(400).json({ error: 'student_ids array is required' });
+    }
+
+    // Verificeer dat gebruiker ouder is van alle opgevraagde leerlingen
+    const { data: students, error: studentsError } = await supabase
+      .from('students')
+      .select('id, name, parent_id')
+      .in('id', student_ids)
+      .eq('mosque_id', mosqueId);
+
+    if (studentsError) {
+      return res.status(500).json({ error: 'Kon leerlingen niet laden' });
+    }
+
+    // Check dat alle leerlingen bij deze ouder horen
+    const invalidStudents = students.filter(s => String(s.parent_id) !== String(userId));
+    if (invalidStudents.length > 0) {
+      return res.status(403).json({ 
+        error: 'Geen toegang tot alle opgevraagde leerlingen' 
+      });
+    }
+
+    // Haal statistieken op voor elke leerling
+    const stats = {};
+    
+    for (const studentId of student_ids) {
+      const { data: progress, error: progressError } = await supabase
+        .from('quran_progress')
+        .select('status, date_completed, soerah_name')
+        .eq('student_id', studentId);
+
+      if (progressError) {
+        console.error(`Error fetching progress for student ${studentId}:`, progressError);
+        stats[studentId] = null;
+        continue;
+      }
+
+      const total_soerahs = 55; // Van Al-Modjaadalah tot Al-Fatiha
+      const completed = progress?.filter(p => p.status === 'voltooid').length || 0;
+      const in_progress = progress?.filter(p => p.status === 'bezig').length || 0;
+      const reviewing = progress?.filter(p => p.status === 'herhaling').length || 0;
+      const completion_percentage = Math.round((completed / total_soerahs) * 100);
+
+      // Laatste voltooide soera
+      const lastCompleted = progress
+        ?.filter(p => p.status === 'voltooid' && p.date_completed)
+        .sort((a, b) => new Date(b.date_completed) - new Date(a.date_completed))[0];
+
+      stats[studentId] = {
+        total_soerahs,
+        completed,
+        in_progress,
+        reviewing,
+        completion_percentage,
+        last_completed: lastCompleted ? {
+          soerah_name: lastCompleted.soerah_name,
+          date_completed: lastCompleted.date_completed
+        } : null
+      };
+    }
+
+    console.log(`[GET Quran Stats] Returning stats for ${Object.keys(stats).length} students`);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('[GET Quran Stats] Error:', error);
+    res.status(500).json({ error: 'Server fout bij laden statistieken' });
+  }
+});
 
 // EMAIL & CONFIG ROUTES (JOUW CODE)
 // =========================================================================================
