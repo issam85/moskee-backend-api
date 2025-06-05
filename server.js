@@ -406,32 +406,118 @@ app.post('/api/mosques/register', async (req, res) => {
     const { mosqueName, subdomain, adminName, adminEmail, adminPassword, address, city, zipcode, phone, website, email: mosqueContactEmail } = req.body;
     if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) return sendError(res, 400, 'Verplichte registratievelden ontbreken.', null, req);
     if (adminPassword.length < 8) return sendError(res, 400, 'Admin wachtwoord moet minimaal 8 karakters lang zijn.', null, req);
-    const normalizedSubdomain = subdomain.toLowerCase().trim(); const normalizedAdminEmail = adminEmail.toLowerCase().trim();
+    const normalizedSubdomain = subdomain.toLowerCase().trim(); 
+    const normalizedAdminEmail = adminEmail.toLowerCase().trim();
+    
+    // Check if subdomain already exists
     const { data: existingSubdomain } = await supabase.from('mosques').select('id').eq('subdomain', normalizedSubdomain).maybeSingle();
     if (existingSubdomain) return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
-    try { const { data: { user: existingAuthUser } } = await supabase.auth.admin.getUserByEmail(normalizedAdminEmail); if (existingAuthUser) return sendError(res, 409, 'Dit emailadres is al geregistreerd in het authenticatiesysteem.', null, req); } catch (error) { if (error.message && !error.message.includes('User not found')) { console.error("Error checking existing auth user for registration:", error); return sendError(res, 500, "Fout bij controleren bestaande auth gebruiker.", error.message, req); } }
+    
+    // Check if email already exists in auth system - SUPABASE V2 COMPATIBLE
+    try { 
+      console.log(`[REGISTER] Checking if email ${normalizedAdminEmail} already exists in auth system...`);
+      const { data: { users }, error } = await supabase.auth.admin.listUsers();
+      
+      if (error) {
+        console.error("Error checking existing auth users for registration:", error);
+        return sendError(res, 500, "Fout bij controleren bestaande auth gebruiker.", error.message, req);
+      }
+      
+      // Check if email already exists in the users list
+      const existingAuthUser = users?.find(user => user.email === normalizedAdminEmail);
+      if (existingAuthUser) {
+        console.log(`[REGISTER] Email ${normalizedAdminEmail} already exists in auth system.`);
+        return sendError(res, 409, 'Dit emailadres is al geregistreerd in het authenticatiesysteem.', null, req);
+      }
+      
+      console.log(`[REGISTER] Email ${normalizedAdminEmail} is available for registration.`);
+    } catch (error) { 
+      console.error("Error checking existing auth user for registration:", error);
+      return sendError(res, 500, "Fout bij controleren bestaande auth gebruiker.", error.message, req);
+    }
+    
+    // Check if email already exists in app database
     const { data: existingAppUser } = await supabase.from('users').select('id').eq('email', normalizedAdminEmail).maybeSingle();
     if (existingAppUser) return sendError(res, 409, 'Dit emailadres is al geregistreerd voor een gebruiker in de applicatie.', null, req);
-    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{name: mosqueName, subdomain: normalizedSubdomain, address, city, zipcode, phone, email: mosqueContactEmail || normalizedAdminEmail, website, m365_configured: false, contribution_1_child: 150, contribution_2_children: 300, contribution_3_children: 450, contribution_4_children: 450, contribution_5_plus_children: 450, m365_sender_email: null, }]).select().single();
+    
+    // Create mosque record
+    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{
+      name: mosqueName, 
+      subdomain: normalizedSubdomain, 
+      address, 
+      city, 
+      zipcode, 
+      phone, 
+      email: mosqueContactEmail || normalizedAdminEmail, 
+      website, 
+      m365_configured: false, 
+      contribution_1_child: 150, 
+      contribution_2_children: 300, 
+      contribution_3_children: 450, 
+      contribution_4_children: 450, 
+      contribution_5_plus_children: 450, 
+      m365_sender_email: null
+    }]).select().single();
     if (mosqueCreateError) throw mosqueCreateError;
-    const { data: { user: supabaseAuthAdmin }, error: supabaseAuthError } = await supabase.auth.admin.createUser({ email: normalizedAdminEmail, password: adminPassword, email_confirm: true });
-    if (supabaseAuthError) { await supabase.from('mosques').delete().eq('id', newMosque.id); return sendError(res, 500, `Fout bij aanmaken authenticatie gebruiker: ${supabaseAuthError.message}`, supabaseAuthError, req); }
-    if (!supabaseAuthAdmin) { await supabase.from('mosques').delete().eq('id', newMosque.id); return sendError(res, 500, 'Kon authenticatie gebruiker niet aanmaken (geen user object).', null, req); }
+    
+    // Create auth user
+    const { data: { user: supabaseAuthAdmin }, error: supabaseAuthError } = await supabase.auth.admin.createUser({ 
+      email: normalizedAdminEmail, 
+      password: adminPassword, 
+      email_confirm: true 
+    });
+    if (supabaseAuthError) { 
+      await supabase.from('mosques').delete().eq('id', newMosque.id); 
+      return sendError(res, 500, `Fout bij aanmaken authenticatie gebruiker: ${supabaseAuthError.message}`, supabaseAuthError, req); 
+    }
+    if (!supabaseAuthAdmin) { 
+      await supabase.from('mosques').delete().eq('id', newMosque.id); 
+      return sendError(res, 500, 'Kon authenticatie gebruiker niet aanmaken (geen user object).', null, req); 
+    }
+    
+    // Create app user record
     const password_hash = await bcrypt.hash(adminPassword, 10);
-    const { data: newAppAdmin, error: appAdminCreateError } = await supabase.from('users').insert([{ id: supabaseAuthAdmin.id, mosque_id: newMosque.id, email: normalizedAdminEmail, password_hash, name: adminName, role: 'admin', is_temporary_password: false }]).select('id, email, name, role').single();
-    if (appAdminCreateError) { await supabase.from('mosques').delete().eq('id', newMosque.id); await supabase.auth.admin.deleteUser(supabaseAuthAdmin.id); throw appAdminCreateError; }
+    const { data: newAppAdmin, error: appAdminCreateError } = await supabase.from('users').insert([{ 
+      id: supabaseAuthAdmin.id, 
+      mosque_id: newMosque.id, 
+      email: normalizedAdminEmail, 
+      password_hash, 
+      name: adminName, 
+      role: 'admin', 
+      is_temporary_password: false 
+    }]).select('id, email, name, role').single();
+    
+    if (appAdminCreateError) { 
+      await supabase.from('mosques').delete().eq('id', newMosque.id); 
+      await supabase.auth.admin.deleteUser(supabaseAuthAdmin.id); 
+      throw appAdminCreateError; 
+    }
+    
+    // Send welcome email if M365 is configured
     if (newAppAdmin && newMosque.m365_configured && newMosque.m365_sender_email) { 
         console.log(`[Mosque Register] New admin ${newAppAdmin.email} for mosque ${newMosque.name}. M365 configured, attempting admin welcome email.`);
         const adminWelcomeSubject = `Welkom als beheerder bij ${newMosque.name}!`;
         const adminWelcomeBody = `<h1>Welkom ${adminName},</h1><p>Uw beheerdersaccount voor het leerlingvolgsysteem van ${newMosque.name} is succesvol aangemaakt.</p><p>U kunt inloggen met de volgende gegevens:</p><ul><li><strong>Email:</strong> ${normalizedAdminEmail}</li><li><strong>Wachtwoord:</strong> ${adminPassword} (het wachtwoord dat u zojuist heeft opgegeven)</li></ul><p>Log in via: https://${normalizedSubdomain}.mijnlvs.nl</p><p>Met vriendelijke groet,</p><p>Het MijnLVS Team</p>`;
-        sendM365EmailInternal({ to: normalizedAdminEmail, subject: adminWelcomeSubject, body: adminWelcomeBody, mosqueId: newMosque.id, emailType: 'm365_admin_mosque_registration_welcome' })
-        .then(result => { if (result.success) console.log(`[Mosque Register] Admin welcome email to ${normalizedAdminEmail} sent/queued. MsgID: ${result.messageId}`); else console.error(`[Mosque Register] Failed to send admin welcome email to ${normalizedAdminEmail}: ${result.error}`, result.details); })
+        sendM365EmailInternal({ 
+          to: normalizedAdminEmail, 
+          subject: adminWelcomeSubject, 
+          body: adminWelcomeBody, 
+          mosqueId: newMosque.id, 
+          emailType: 'm365_admin_mosque_registration_welcome' 
+        })
+        .then(result => { 
+          if (result.success) console.log(`[Mosque Register] Admin welcome email to ${normalizedAdminEmail} sent/queued. MsgID: ${result.messageId}`); 
+          else console.error(`[Mosque Register] Failed to send admin welcome email to ${normalizedAdminEmail}: ${result.error}`, result.details); 
+        })
         .catch(err => console.error(`[Mosque Register] Critical error sending admin welcome email:`, err));
     } else if (newAppAdmin) {
         console.log(`[Mosque Register] New admin ${newAppAdmin.email} created for ${newMosque.name}. M365 not yet configured (or sender missing), so no welcome email sent automatically.`);
     }
+    
     res.status(201).json({ success: true, message: 'Registratie succesvol!', mosque: newMosque, admin: newAppAdmin });
-  } catch (error) { sendError(res, error.code === '23505' || (error.message && error.message.includes('already registered')) ? 409 : (error.status || 400), error.message || 'Fout bij registratie.', error.details || error.hint || error, req); }
+  } catch (error) { 
+    sendError(res, error.code === '23505' || (error.message && error.message.includes('already registered')) ? 409 : (error.status || 400), error.message || 'Fout bij registratie.', error.details || error.hint || error, req); 
+  }
 });
 
 
