@@ -85,7 +85,7 @@ try {
     console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS NOT available.");
     if (!supabase) console.error("❌ [INIT POST-CREATE DEBUG] supabase client is falsy.");
     else if (!supabase.auth) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth is falsy.");
-    else if (supabase.auth && !supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined on the existing supabase.auth object.");
+    else if (!supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined.");
     
     // BELANGRIJK: Voeg Supabase versie check toe
     console.error("🔍 [VERSION CHECK] Checking Supabase version...");
@@ -623,13 +623,10 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
 
     // GET all resources for a mosque
     app.get(`/api/mosques/:mosqueId/${tableName}`, async (req, res) => {
-      // DE FIX: Voorkom caching voor alle generieke GET routes
-      res.set('Cache-Control', 'no-store');
-
-      if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
-      if (req.user.mosque_id !== req.params.mosqueId && req.user.role !== 'superadmin') {
-          return sendError(res, 403, "Niet geautoriseerd voor data van deze moskee.", null, req);
-      }
+        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
+        if (req.user.mosque_id !== req.params.mosqueId && req.user.role !== 'superadmin') { // 'superadmin' als voorbeeld voor een rol die overal bij mag
+            return sendError(res, 403, "Niet geautoriseerd voor data van deze moskee.", null, req);
+        }
         // Leraren mogen mogelijk alleen bepaalde tabellen zien, of gefilterde data.
         // Voor nu: als je een leraar bent, en je bent van de moskee, mag je de data zien. Verfijn dit indien nodig.
         // if (req.user.role === 'teacher' && !['classes', 'students'].includes(tableName)) { 
@@ -1518,41 +1515,6 @@ app.post('/api/mosques/:mosqueId/students/quran-stats', async (req, res) => {
   }
 });
 
-// ==================================
-// ======== NIEUWE ROUTE HIER =======
-// ==================================
-app.get('/api/teacher/classes', async (req, res) => {
-  if (!req.user) {
-    return sendError(res, 401, "Authenticatie vereist.", null, req);
-  }
-  if (req.user.role !== 'teacher') {
-    return sendError(res, 403, "Toegang geweigerd. Alleen voor docenten.", null, req);
-  }
-
-  // DE FIX: Voorkom caching voor deze dynamische route
-  res.set('Cache-Control', 'no-store');
-
-  try {
-    const teacherId = req.user.id;
-    console.log(`[API GET /api/teacher/classes] Fetching classes for teacher ID: ${teacherId}`);
-    const { data: classes, error } = await supabase
-      .from('classes')
-      .select('id, name, description') 
-      .eq('teacher_id', teacherId)
-      .eq('active', true)
-      .order('name', { ascending: true }); 
-
-    if (error) {
-      throw error;
-    }
-    
-    res.status(200).json(classes);
-
-  } catch (error) {
-    sendError(res, 500, 'Serverfout bij het ophalen van de klassen van de docent.', error.message, req);
-  }
-});
-
 // EMAIL & CONFIG ROUTES (JOUW CODE)
 // =========================================================================================
 app.post('/api/send-email-m365', async (req, res) => {
@@ -1698,6 +1660,7 @@ app.get('/api/config-check', (req, res) => {
 });
 
 // Catch all undefined routes
+// Catch all undefined routes
 app.use('*', (req, res) => {
   sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
@@ -1718,8 +1681,7 @@ app.use('*', (req, res) => {
       'POST /api/mosques/:mosqueId/students',
       'GET /api/mosques/:mosqueId/students/:studentId/quran-progress', 
       'POST /api/mosques/:mosqueId/students/:studentId/quran-progress',
-      'POST /api/mosques/:mosqueId/students/quran-stats',
-      'GET /api/teacher/classes' // NIEUWE ROUTE HIER TOEGEVOEGD
+      'POST /api/mosques/:mosqueId/students/quran-stats'
   ]}, req);
 });
 
