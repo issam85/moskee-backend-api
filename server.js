@@ -623,10 +623,13 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
 
     // GET all resources for a mosque
     app.get(`/api/mosques/:mosqueId/${tableName}`, async (req, res) => {
-        if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
-        if (req.user.mosque_id !== req.params.mosqueId && req.user.role !== 'superadmin') { // 'superadmin' als voorbeeld voor een rol die overal bij mag
-            return sendError(res, 403, "Niet geautoriseerd voor data van deze moskee.", null, req);
-        }
+      // DE FIX: Voorkom caching voor alle generieke GET routes
+      res.set('Cache-Control', 'no-store');
+
+      if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
+      if (req.user.mosque_id !== req.params.mosqueId && req.user.role !== 'superadmin') {
+          return sendError(res, 403, "Niet geautoriseerd voor data van deze moskee.", null, req);
+      }
         // Leraren mogen mogelijk alleen bepaalde tabellen zien, of gefilterde data.
         // Voor nu: als je een leraar bent, en je bent van de moskee, mag je de data zien. Verfijn dit indien nodig.
         // if (req.user.role === 'teacher' && !['classes', 'students'].includes(tableName)) { 
