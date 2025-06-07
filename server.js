@@ -1526,24 +1526,23 @@ app.get('/api/teacher/classes', async (req, res) => {
     return sendError(res, 403, "Toegang geweigerd. Alleen voor docenten.", null, req);
   }
 
-  // Dit vertelt de browser en proxies om deze respons nooit te cachen.
+  // DE FIX: Voorkom caching voor deze dynamische route
   res.set('Cache-Control', 'no-store');
-  // ------------------------------------
 
   try {
     const teacherId = req.user.id;
     console.log(`[API GET /api/teacher/classes] Fetching classes for teacher ID: ${teacherId}`);
-
     const { data: classes, error } = await supabase
       .from('classes')
-      .select('id, name, description')
+      .select('id, name, description') 
       .eq('teacher_id', teacherId)
       .eq('active', true)
-      .order('name', { ascending: true });
+      .order('name', { ascending: true }); 
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
     
-    // Stuur altijd een 200 OK status met de JSON data.
     res.status(200).json(classes);
 
   } catch (error) {
