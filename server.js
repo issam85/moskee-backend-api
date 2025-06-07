@@ -85,7 +85,7 @@ try {
     console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin object IS NOT available.");
     if (!supabase) console.error("❌ [INIT POST-CREATE DEBUG] supabase client is falsy.");
     else if (!supabase.auth) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth is falsy.");
-    else if (!supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined.");
+    else if (supabase.auth && !supabase.auth.admin) console.error("❌ [INIT POST-CREATE DEBUG] supabase.auth.admin is falsy/undefined on the existing supabase.auth object.");
     
     // BELANGRIJK: Voeg Supabase versie check toe
     console.error("🔍 [VERSION CHECK] Checking Supabase version...");
@@ -1515,6 +1515,45 @@ app.post('/api/mosques/:mosqueId/students/quran-stats', async (req, res) => {
   }
 });
 
+// ==================================
+// ======== NIEUWE ROUTE HIER =======
+// ==================================
+app.get('/api/teacher/classes', async (req, res) => {
+  // De authenticatie middleware heeft `req.user` al gevuld.
+  if (!req.user) {
+    return sendError(res, 401, "Authenticatie vereist.", null, req);
+  }
+
+  // Autorisatie: check of de ingelogde gebruiker wel een docent is.
+  if (req.user.role !== 'teacher') {
+    return sendError(res, 403, "Toegang geweigerd. Alleen voor docenten.", null, req);
+  }
+
+  try {
+    const teacherId = req.user.id;
+    console.log(`[API GET /api/teacher/classes] Fetching classes for teacher ID: ${teacherId}`);
+
+    // Query de database voor alle actieve klassen die aan deze docent zijn toegewezen.
+    const { data: classes, error } = await supabase
+      .from('classes')
+      .select('id, name, description') // Selecteer alleen de velden die de frontend nodig heeft.
+      .eq('teacher_id', teacherId)
+      .eq('active', true)
+      .order('name', { ascending: true }); // Sorteer klassen op naam
+
+    if (error) {
+      // Gooi een error als de database-query mislukt.
+      throw error;
+    }
+    
+    // Stuur de gevonden klassen terug. Dit is een lege array [] als er geen klassen zijn.
+    res.status(200).json(classes);
+
+  } catch (error) {
+    sendError(res, 500, 'Serverfout bij het ophalen van de klassen van de docent.', error.message, req);
+  }
+});
+
 // EMAIL & CONFIG ROUTES (JOUW CODE)
 // =========================================================================================
 app.post('/api/send-email-m365', async (req, res) => {
@@ -1660,7 +1699,6 @@ app.get('/api/config-check', (req, res) => {
 });
 
 // Catch all undefined routes
-// Catch all undefined routes
 app.use('*', (req, res) => {
   sendError(res, 404, 'Route not found.', { path: req.originalUrl, method: req.method, available_routes_summary: [
       'GET /api/health', 'GET /api/config-check', 'POST /api/auth/login', 'POST /api/mosques/register',
@@ -1681,7 +1719,8 @@ app.use('*', (req, res) => {
       'POST /api/mosques/:mosqueId/students',
       'GET /api/mosques/:mosqueId/students/:studentId/quran-progress', 
       'POST /api/mosques/:mosqueId/students/:studentId/quran-progress',
-      'POST /api/mosques/:mosqueId/students/quran-stats'
+      'POST /api/mosques/:mosqueId/students/quran-stats',
+      'GET /api/teacher/classes' // NIEUWE ROUTE HIER TOEGEVOEGD
   ]}, req);
 });
 
