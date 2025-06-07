@@ -1519,34 +1519,31 @@ app.post('/api/mosques/:mosqueId/students/quran-stats', async (req, res) => {
 // ======== NIEUWE ROUTE HIER =======
 // ==================================
 app.get('/api/teacher/classes', async (req, res) => {
-  // De authenticatie middleware heeft `req.user` al gevuld.
   if (!req.user) {
     return sendError(res, 401, "Authenticatie vereist.", null, req);
   }
-
-  // Autorisatie: check of de ingelogde gebruiker wel een docent is.
   if (req.user.role !== 'teacher') {
     return sendError(res, 403, "Toegang geweigerd. Alleen voor docenten.", null, req);
   }
+
+  // Dit vertelt de browser en proxies om deze respons nooit te cachen.
+  res.set('Cache-Control', 'no-store');
+  // ------------------------------------
 
   try {
     const teacherId = req.user.id;
     console.log(`[API GET /api/teacher/classes] Fetching classes for teacher ID: ${teacherId}`);
 
-    // Query de database voor alle actieve klassen die aan deze docent zijn toegewezen.
     const { data: classes, error } = await supabase
       .from('classes')
-      .select('id, name, description') // Selecteer alleen de velden die de frontend nodig heeft.
+      .select('id, name, description')
       .eq('teacher_id', teacherId)
       .eq('active', true)
-      .order('name', { ascending: true }); // Sorteer klassen op naam
+      .order('name', { ascending: true });
 
-    if (error) {
-      // Gooi een error als de database-query mislukt.
-      throw error;
-    }
+    if (error) throw error;
     
-    // Stuur de gevonden klassen terug. Dit is een lege array [] als er geen klassen zijn.
+    // Stuur altijd een 200 OK status met de JSON data.
     res.status(200).json(classes);
 
   } catch (error) {
