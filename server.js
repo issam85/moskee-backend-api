@@ -1647,6 +1647,87 @@ app.post('/api/send-email-m365', async (req, res) => {
   console.log("Backend: /api/send-email-m365 route processing FINISHED");
   console.log("-----------------------------------------------------\n");
 });
+
+// NIEUWE ROUTE: Verstuur email naar een specifieke ouder
+app.post('/api/email/send-to-parent', async (req, res) => {
+    if (!req.user || req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
+
+    const { recipientUserId, subject, body } = req.body;
+    const sender = req.user; // De ingelogde leraar
+
+    if (!recipientUserId || !subject || !body) return sendError(res, 400, "Ontvanger, onderwerp en bericht zijn verplicht.", null, req);
+    
+    try {
+        const { data: recipient, error: userError } = await supabase.from('users').select('id, email, name, mosque_id').eq('id', recipientUserId).single();
+        if (userError || !recipient) return sendError(res, 404, "Ontvanger niet gevonden.", null, req);
+        if (recipient.mosque_id !== sender.mosque_id) return sendError(res, 403, "U kunt alleen mailen binnen uw eigen moskee.", null, req);
+
+        const emailBodyHtml = `
+            <p>Beste ${recipient.name},</p>
+            <p>U heeft een bericht ontvangen van leraar ${sender.name}:</p>
+            <div style="border-left: 2px solid #ccc; padding-left: 1rem; margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div>
+            <p>Met vriendelijke groet,<br>Het team van MijnLVS</p>
+        `;
+        
+        const emailResult = await sendM365EmailInternal({ to: recipient.email, subject, body: emailBodyHtml, mosqueId: sender.mosque_id, emailType: 'm365_teacher_to_parent_email' });
+
+        if (emailResult.success) {
+            res.json({ success: true, message: `Email succesvol verstuurd naar ${recipient.name}.` });
+        } else {
+            sendError(res, 500, `Email versturen mislukt: ${emailResult.error}`, emailResult.details, req);
+        }
+    } catch (error) {
+        sendError(res, 500, 'Onverwachte serverfout bij versturen van e-mail.', error.message, req);
+    }
+});
+
+// NIEUWE ROUTE: Verstuur bulk email naar een hele klas
+app.post('/api/email/send-to-class', async (req, res) => {
+    if (!req.user || req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
+
+    const { classId, subject, body } = req.body;
+    const sender = req.user;
+
+    if (!classId || !subject || !body) return sendError(res, 400, "Klas ID, onderwerp en bericht zijn verplicht.", null, req);
+
+    try {
+        // Verifieer dat de leraar eigenaar is van de klas
+        const { data: classInfo, error: classError } = await supabase.from('classes').select('id, name, teacher_id, mosque_id').eq('id', classId).single();
+        if (classError || !classInfo) return sendError(res, 404, "Klas niet gevonden.", null, req);
+        if (classInfo.teacher_id !== sender.id) return sendError(res, 403, "U kunt alleen mailen naar uw eigen klassen.", null, req);
+
+        // Haal alle ouders van de leerlingen in deze klas op
+        const { data: parents, error: parentsError } = await supabase.rpc('get_parents_of_class', { p_class_id: classId });
+        if (parentsError) throw parentsError;
+        if (!parents || parents.length === 0) return sendError(res, 404, "Geen ouders gevonden voor deze klas.", null, req);
+
+        const emailBodyHtml = `
+            <p>Beste ouders/verzorgers van ${classInfo.name},</p>
+            <p>U heeft een bericht ontvangen van leraar ${sender.name}:</p>
+            <div style="border-left: 2px solid #ccc; padding-left: 1rem; margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div>
+            <p>Met vriendelijke groet,<br>Het team van MijnLVS</p>
+        `;
+
+        // Verstuur de e-mails asynchroon
+        const emailPromises = parents.map(parent => 
+            sendM365EmailInternal({
+                to: parent.email,
+                subject: `Bericht voor ${classInfo.name}: ${subject}`,
+                body: emailBodyHtml,
+                mosqueId: sender.mosque_id,
+                emailType: 'm365_teacher_to_class_bulk'
+            })
+        );
+        const results = await Promise.all(emailPromises);
+        const successes = results.filter(r => r.success).length;
+        const failures = results.filter(r => !r.success).length;
+
+        res.json({ success: true, message: `Verstuur-opdracht voltooid. ${successes} email(s) succesvol verstuurd, ${failures} mislukt.` });
+
+    } catch (error) {
+        sendError(res, 500, 'Onverwachte serverfout bij versturen van bulk-email.', error.message, req);
+    }
+});
 // =========================================================================================
 // EINDE EMAIL ROUTES (JOUW CODE)
 // =========================================================================================
