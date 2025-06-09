@@ -744,7 +744,8 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
         if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
         try {
             const { id } = req.params;
-            const { data: resource, error: fetchErr } = await supabase.from(tableName).select('mosque_id, email').eq('id', id).single(); 
+            const selectStringForDelete = tableName === 'users' ? 'mosque_id, email' : 'mosque_id';
+            const { data: resource, error: fetchErr } = await supabase.from(tableName).select(selectStringForDelete).eq('id', id).single(); 
             if (fetchErr || !resource) return sendError(res, 404, `${singularName} niet gevonden voor verwijdering.`, null, req);
             if (req.user.mosque_id !== resource.mosque_id && req.user.role !== 'superadmin') return sendError(res, 403, "Niet geautoriseerd voor deze resource.", null, req);
             if (req.user.role !== 'admin' && req.user.role !== 'superadmin') return sendError(res, 403, "Alleen admins mogen dit verwijderen.", null, req);
@@ -774,7 +775,7 @@ const createCrudEndpoints = (tableName, selectString = '*', singularNameOverride
 };
 createCrudEndpoints('users', 'id, mosque_id, email, name, role, phone, address, city, zipcode, amount_due, created_at, last_login, is_temporary_password');
 createCrudEndpoints('classes', '*, teacher:teacher_id(id, name), students(count)');
-createCrudEndpoints('students', '*, parent:parent_id(id, name, email, phone, amount_due), class:class_id(id, name, teacher_id, teacher:teacher_id(name))');
+createCrudEndpoints('students', 'id, name, date_of_birth, notes, mosque_id, parent_id, class_id, active, parent:parent_id(id, name, email, phone, amount_due), class:class_id(id, name, teacher_id, teacher:teacher_id(name))', 'student');
 createCrudEndpoints('payments', '*, parent:parent_id(id, name, email), student:student_id(id, name), processed_by_user:processed_by(name)');
 
 // ======================
