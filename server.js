@@ -1344,29 +1344,50 @@ app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req,
 app.get('/api/students/:studentId/report', async (req, res) => {
     if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     const { studentId } = req.params;
-    const { period } = req.query; // bv. "2024-2025"
+    const { period } = req.query; 
 
     if (!period) return sendError(res, 400, "Een rapport-periode is vereist.", null, req);
 
     try {
-        // Autorisatie check: is de leraar bevoegd voor deze leerling?
+        // Autorisatie check (blijft hetzelfde)
         const { data: student, error: studentError } = await supabase.from('students').select('class_id, classes(teacher_id)').eq('id', studentId).single();
-        if (studentError || !student || student.classes.teacher_id !== req.user.id) {
+        if (studentError || !student || (student.classes && student.classes.teacher_id !== req.user.id && req.user.role !== 'admin')) {
             return sendError(res, 403, "Niet geautoriseerd voor deze leerling.", null, req);
         }
 
+        // 1. Haal het opgeslagen rapport op
         const { data: report, error: reportError } = await supabase
             .from('student_reports')
             .select('*')
             .eq('student_id', studentId)
             .eq('report_period', period)
-            .maybeSingle(); // .maybeSingle() geeft null terug ipv een error als niks is gevonden
-
+            .maybeSingle();
         if (reportError) throw reportError;
 
-        res.json(report || { grades: {}, comments: '' }); // Geef een leeg object terug als er geen rapport is
+        // 2. NIEUW: Haal aanwezigheidsstatistieken op
+        const { data: attendanceData, error: attendanceError } = await supabase
+            .from('absentie_registraties')
+            .select('status', { count: 'exact' })
+            .eq('leerling_id', studentId);
+        if (attendanceError) throw attendanceError;
+
+        const attendanceStats = {
+            aanwezig: attendanceData.filter(r => r.status === 'aanwezig').length,
+            te_laat: attendanceData.filter(r => r.status === 'te_laat').length,
+            afwezig_geoorloofd: attendanceData.filter(r => r.status === 'afwezig_geoorloofd').length,
+            afwezig_ongeoorloofd: attendanceData.filter(r => r.status === 'afwezig_ongeoorloofd').length,
+        };
+
+        // 3. Combineer de data en stuur terug
+        const finalResponse = {
+            ...(report || { grades: {}, comments: '' }), // Neem opgeslagen rapportdata of een leeg object
+            attendanceStats: attendanceStats // Voeg altijd de actuele aanwezigheidscijfers toe
+        };
+        
+        res.json(finalResponse);
+
     } catch (error) {
-        sendError(res, 500, 'Fout bij ophalen van rapport.', error.message, req);
+        sendError(res, 500, 'Fout bij ophalen van rapport data.', error.message, req);
     }
 });
 
