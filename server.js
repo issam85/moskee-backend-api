@@ -531,7 +531,7 @@ app.get('/api/mosque/:subdomain', async (req, res) => {
     const { data: mosque, error } = await supabase
       .from('mosques')
       // Nieuwe, uitgebreide regel
-      .select('id, name, subdomain, ..., contribution_5_plus_children, created_at, updated_at, contact_committee_name, contact_committee_email')
+      .select('id, name, subdomain, address, city, zipcode, phone, email, website, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured, contribution_1_child, contribution_2_children, contribution_3_children, contribution_4_children, contribution_5_plus_children, contact_committee_name, contact_committee_email, created_at, updated_at')
       .eq('subdomain', subdomain.toLowerCase().trim())
       .single();
     if (error || !mosque) return sendError(res, 404, 'Moskee niet gevonden.', null, req);
