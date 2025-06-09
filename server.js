@@ -1341,61 +1341,38 @@ app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req,
   }
 });
 // NIEUWE ROUTE: Haal een specifiek rapport op voor een leerling
+// CONTROLEER EN VERVANG DEZE ROUTES IN server.js
+
+// NIEUWE ROUTE: Haal een specifiek rapport op voor een leerling
 app.get('/api/students/:studentId/report', async (req, res) => {
     if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     const { studentId } = req.params;
-    const { period } = req.query;
+    const { period } = req.query; // bv. "2024-2025"
 
     if (!period) return sendError(res, 400, "Een rapport-periode is vereist.", null, req);
 
     try {
-        // Autorisatie check (blijft hetzelfde)
+        // Autorisatie check
         const { data: student, error: studentError } = await supabase.from('students').select('class_id, classes(teacher_id)').eq('id', studentId).single();
         if (studentError || !student || (student.classes && student.classes.teacher_id !== req.user.id && req.user.role !== 'admin')) {
             return sendError(res, 403, "Niet geautoriseerd voor deze leerling.", null, req);
         }
 
-        // 1. Haal het opgeslagen rapport op (blijft hetzelfde)
-        const { data: report, error: reportError } = await supabase
-            .from('student_reports')
-            .select('*')
-            .eq('student_id', studentId)
-            .eq('report_period', period)
-            .maybeSingle();
+        // 1. Haal het opgeslagen rapport op
+        const { data: report, error: reportError } = await supabase.from('student_reports').select('*').eq('student_id', studentId).eq('report_period', period).maybeSingle();
         if (reportError) throw reportError;
 
-        // 2. GECORRIGEERD: Haal aanwezigheidsstatistieken op met efficiënte telling
+        // 2. Haal aanwezigheidsstatistieken op
         const getCountForStatus = async (status) => {
-            const { count, error } = await supabase
-                .from('absentie_registraties')
-                .select('*', { count: 'exact', head: true })
-                .eq('leerling_id', studentId) // DE CRUCIALE FILTER
-                .eq('status', status);
+            const { count, error } = await supabase.from('absentie_registraties').select('*', { count: 'exact', head: true }).eq('leerling_id', studentId).eq('status', status);
             if (error) throw error;
             return count || 0;
         };
-        
-        // Voer alle tellingen tegelijkertijd uit
-        const [aanwezigCount, teLaatCount, geoorloofdCount, ongeoorloofdCount] = await Promise.all([
-            getCountForStatus('aanwezig'),
-            getCountForStatus('te_laat'),
-            getCountForStatus('afwezig_geoorloofd'),
-            getCountForStatus('afwezig_ongeoorloofd')
-        ]);
+        const [aanwezigCount, teLaatCount, geoorloofdCount, ongeoorloofdCount] = await Promise.all([ getCountForStatus('aanwezig'), getCountForStatus('te_laat'), getCountForStatus('afwezig_geoorloofd'), getCountForStatus('afwezig_ongeoorloofd') ]);
+        const attendanceStats = { aanwezig: aanwezigCount, te_laat: teLaatCount, afwezig_geoorloofd: geoorloofdCount, afwezig_ongeoorloofd: ongeoorloofdCount };
 
-        const attendanceStats = {
-            aanwezig: aanwezigCount,
-            te_laat: teLaatCount,
-            afwezig_geoorloofd: geoorloofdCount,
-            afwezig_ongeoorloofd: ongeoorloofdCount,
-        };
-
-        // 3. Combineer de data en stuur terug (blijft hetzelfde)
-        const finalResponse = {
-            ...(report || { grades: {}, comments: '' }),
-            attendanceStats: attendanceStats
-        };
-        
+        // 3. Combineer de data
+        const finalResponse = { ...(report || { grades: {}, comments: '' }), attendanceStats: attendanceStats };
         res.json(finalResponse);
 
     } catch (error) {
@@ -1403,7 +1380,33 @@ app.get('/api/students/:studentId/report', async (req, res) => {
     }
 });
 
-// VERVANG DE VOLLEDIGE POST-ROUTE IN server.js MET DEZE CODE
+// NIEUWE ROUTE: Sla een rapport op (maakt aan of update)
+app.post('/api/reports/save', async (req, res) => {
+    if (!req.user || req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen rapporten opslaan.", null, req);
+    
+    const { studentId, classId, mosqueId, period, grades, comments } = req.body;
+    const teacherId = req.user.id;
+
+    if (!studentId || !classId || !mosqueId || !period) return sendError(res, 400, "Verplichte velden voor opslaan rapport ontbreken.", null, req);
+
+    try {
+        const reportData = {
+            student_id: studentId, class_id: classId, mosque_id: mosqueId, teacher_id: teacherId,
+            report_period: period, grades: grades || {}, comments: comments || '', updated_at: new Date()
+        };
+
+        const { data, error } = await supabase.from('student_reports')
+            .upsert(reportData, { onConflict: 'student_id, report_period' })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json({ success: true, message: 'Rapport succesvol opgeslagen.', data });
+    } catch (error) {
+        sendError(res, 500, 'Fout bij opslaan van rapport.', error.message, req);
+    }
+});
 
 app.post('/api/mosques/:mosqueId/students/attendance-stats', async (req, res) => {
   try {
