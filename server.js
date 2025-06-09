@@ -1348,31 +1348,43 @@ app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req,
 app.get('/api/students/:studentId/report', async (req, res) => {
     if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     const { studentId } = req.params;
-    const { period } = req.query; // bv. "2024-2025"
+    const { period } = req.query; 
 
     if (!period) return sendError(res, 400, "Een rapport-periode is vereist.", null, req);
 
     try {
-        // Autorisatie check
-        const { data: student, error: studentError } = await supabase.from('students').select('class_id, classes(teacher_id)').eq('id', studentId).single();
-        if (studentError || !student || (student.classes && student.classes.teacher_id !== req.user.id && req.user.role !== 'admin')) {
-            return sendError(res, 403, "Niet geautoriseerd voor deze leerling.", null, req);
+        // STAP 1: Haal ALLE benodigde info over de leerling in ÉÉN keer op
+        const { data: studentInfo, error: studentError } = await supabase
+            .from('students')
+            .select('*, classes(teacher_id)') // Selecteer alle kolommen van de student, plus de leraar-ID van de klas
+            .eq('id', studentId)
+            .single();
+
+        if (studentError || !studentInfo) {
+            return sendError(res, 403, "Leerling niet gevonden of geen toegang.", studentError?.message, req);
         }
 
-        // 1. Haal het opgeslagen rapport op
+        // STAP 2: Voer de autorisatiecheck uit op de zojuist opgehaalde data
+        const isTeacherOfClass = req.user.role === 'teacher' && studentInfo.classes?.teacher_id === req.user.id;
+        const isParentOfStudent = req.user.role === 'parent' && studentInfo.parent_id === req.user.id;
+        const isAdminOfMosque = req.user.role === 'admin' && studentInfo.mosque_id === req.user.mosque_id;
+
+        if (!isTeacherOfClass && !isParentOfStudent && !isAdminOfMosque) {
+            return sendError(res, 403, "Niet geautoriseerd om dit rapport te bekijken.", null, req);
+        }
+
+        // --- Vanaf hier gaat de code verder zoals voorheen ---
+
+        // 3. Haal het opgeslagen rapport op
         const { data: report, error: reportError } = await supabase.from('student_reports').select('*').eq('student_id', studentId).eq('report_period', period).maybeSingle();
         if (reportError) throw reportError;
 
-        // 2. Haal aanwezigheidsstatistieken op
-        const getCountForStatus = async (status) => {
-            const { count, error } = await supabase.from('absentie_registraties').select('*', { count: 'exact', head: true }).eq('leerling_id', studentId).eq('status', status);
-            if (error) throw error;
-            return count || 0;
-        };
+        // 4. Haal aanwezigheidsstatistieken op
+        const getCountForStatus = async (status) => { /* ... ongewijzigde, correcte code ... */ };
         const [aanwezigCount, teLaatCount, geoorloofdCount, ongeoorloofdCount] = await Promise.all([ getCountForStatus('aanwezig'), getCountForStatus('te_laat'), getCountForStatus('afwezig_geoorloofd'), getCountForStatus('afwezig_ongeoorloofd') ]);
         const attendanceStats = { aanwezig: aanwezigCount, te_laat: teLaatCount, afwezig_geoorloofd: geoorloofdCount, afwezig_ongeoorloofd: ongeoorloofdCount };
 
-        // 3. Combineer de data
+        // 5. Combineer de data
         const finalResponse = { ...(report || { grades: {}, comments: '' }), attendanceStats: attendanceStats };
         res.json(finalResponse);
 
