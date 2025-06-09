@@ -1368,11 +1368,11 @@ app.get('/api/students/:studentId/report', async (req, res) => {
         const getCountForStatus = async (status) => {
             const { count, error } = await supabase
                 .from('absentie_registraties')
-                .select('*', { count: 'exact', head: true }) // head: true is belangrijk, het haalt geen data op, alleen de telling
-                .eq('leerling_id', studentId)
+                .select('*', { count: 'exact', head: true })
+                .eq('leerling_id', studentId) // DE CRUCIALE FILTER
                 .eq('status', status);
             if (error) throw error;
-            return count;
+            return count || 0;
         };
         
         // Voer alle tellingen tegelijkertijd uit
@@ -1403,10 +1403,8 @@ app.get('/api/students/:studentId/report', async (req, res) => {
     }
 });
 
-// NIEUWE ROUTE: Sla een rapport op (maakt aan of update)
-// VERVANG DEZE VOLLEDIGE ROUTE IN server.js
+// VERVANG DE VOLLEDIGE POST-ROUTE IN server.js MET DEZE CODE
 
-// POST absentie statistieken voor specifieke leerlingen (voor ouders)
 app.post('/api/mosques/:mosqueId/students/attendance-stats', async (req, res) => {
   try {
     const { mosqueId } = req.params;
@@ -1416,7 +1414,7 @@ app.post('/api/mosques/:mosqueId/students/attendance-stats', async (req, res) =>
       return sendError(res, 400, 'student_ids array is required', null, req);
     }
 
-    // Autorisatie checks (blijven hetzelfde)
+    // Autorisatie checks (blijven ongewijzigd)
     if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
     if (req.user.mosque_id !== mosqueId) return sendError(res, 403, 'Geen toegang tot deze moskee', null, req);
     
@@ -1442,7 +1440,7 @@ app.post('/api/mosques/:mosqueId/students/attendance-stats', async (req, res) =>
                 .eq('leerling_id', studentId)
                 .eq('status', status);
             if (error) throw error;
-            return count;
+            return count || 0;
         };
 
         const [aanwezig, te_laat, afwezig_geoorloofd, afwezig_ongeoorloofd] = await Promise.all([
