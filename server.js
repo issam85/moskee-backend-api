@@ -1353,10 +1353,9 @@ app.get('/api/students/:studentId/report', async (req, res) => {
     if (!period) return sendError(res, 400, "Een rapport-periode is vereist.", null, req);
 
     try {
-        // STAP 1: Haal ALLE benodigde info over de leerling in ÉÉN keer op
         const { data: studentInfo, error: studentError } = await supabase
             .from('students')
-            .select('*, classes(teacher_id)') // Selecteer alle kolommen van de student, plus de leraar-ID van de klas
+            .select('*, classes(teacher_id)') 
             .eq('id', studentId)
             .single();
 
@@ -1364,7 +1363,6 @@ app.get('/api/students/:studentId/report', async (req, res) => {
             return sendError(res, 403, "Leerling niet gevonden of geen toegang.", studentError?.message, req);
         }
 
-        // STAP 2: Voer de autorisatiecheck uit op de zojuist opgehaalde data
         const isTeacherOfClass = req.user.role === 'teacher' && studentInfo.classes?.teacher_id === req.user.id;
         const isParentOfStudent = req.user.role === 'parent' && studentInfo.parent_id === req.user.id;
         const isAdminOfMosque = req.user.role === 'admin' && studentInfo.mosque_id === req.user.mosque_id;
@@ -1373,18 +1371,17 @@ app.get('/api/students/:studentId/report', async (req, res) => {
             return sendError(res, 403, "Niet geautoriseerd om dit rapport te bekijken.", null, req);
         }
 
-        // --- Vanaf hier gaat de code verder zoals voorheen ---
-
-        // 3. Haal het opgeslagen rapport op
         const { data: report, error: reportError } = await supabase.from('student_reports').select('*').eq('student_id', studentId).eq('report_period', period).maybeSingle();
         if (reportError) throw reportError;
 
-        // 4. Haal aanwezigheidsstatistieken op
-        const getCountForStatus = async (status) => { /* ... ongewijzigde, correcte code ... */ };
+        const getCountForStatus = async (status) => {
+            const { count, error } = await supabase.from('absentie_registraties').select('*', { count: 'exact', head: true }).eq('leerling_id', studentId).eq('status', status);
+            if (error) throw error;
+            return count || 0;
+        };
         const [aanwezigCount, teLaatCount, geoorloofdCount, ongeoorloofdCount] = await Promise.all([ getCountForStatus('aanwezig'), getCountForStatus('te_laat'), getCountForStatus('afwezig_geoorloofd'), getCountForStatus('afwezig_ongeoorloofd') ]);
         const attendanceStats = { aanwezig: aanwezigCount, te_laat: teLaatCount, afwezig_geoorloofd: geoorloofdCount, afwezig_ongeoorloofd: ongeoorloofdCount };
 
-        // 5. Combineer de data
         const finalResponse = { ...(report || { grades: {}, comments: '' }), attendanceStats: attendanceStats };
         res.json(finalResponse);
 
@@ -1392,6 +1389,7 @@ app.get('/api/students/:studentId/report', async (req, res) => {
         sendError(res, 500, 'Fout bij ophalen van rapport data.', error.message, req);
     }
 });
+
 
 // NIEUWE ROUTE: Sla een rapport op (maakt aan of update)
 app.post('/api/reports/save', async (req, res) => {
