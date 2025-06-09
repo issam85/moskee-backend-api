@@ -1340,7 +1340,69 @@ app.get('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req,
     res.status(500).json({ error: 'Server fout bij laden voortgang' });
   }
 });
+// NIEUWE ROUTE: Haal een specifiek rapport op voor een leerling
+app.get('/api/students/:studentId/report', async (req, res) => {
+    if (!req.user) return sendError(res, 401, "Authenticatie vereist.", null, req);
+    const { studentId } = req.params;
+    const { period } = req.query; // bv. "2024-2025"
 
+    if (!period) return sendError(res, 400, "Een rapport-periode is vereist.", null, req);
+
+    try {
+        // Autorisatie check: is de leraar bevoegd voor deze leerling?
+        const { data: student, error: studentError } = await supabase.from('students').select('class_id, classes(teacher_id)').eq('id', studentId).single();
+        if (studentError || !student || student.classes.teacher_id !== req.user.id) {
+            return sendError(res, 403, "Niet geautoriseerd voor deze leerling.", null, req);
+        }
+
+        const { data: report, error: reportError } = await supabase
+            .from('student_reports')
+            .select('*')
+            .eq('student_id', studentId)
+            .eq('report_period', period)
+            .maybeSingle(); // .maybeSingle() geeft null terug ipv een error als niks is gevonden
+
+        if (reportError) throw reportError;
+
+        res.json(report || { grades: {}, comments: '' }); // Geef een leeg object terug als er geen rapport is
+    } catch (error) {
+        sendError(res, 500, 'Fout bij ophalen van rapport.', error.message, req);
+    }
+});
+
+// NIEUWE ROUTE: Sla een rapport op (maakt aan of update)
+app.post('/api/reports/save', async (req, res) => {
+    if (!req.user || req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen rapporten opslaan.", null, req);
+    
+    const { studentId, classId, mosqueId, period, grades, comments } = req.body;
+    const teacherId = req.user.id;
+
+    if (!studentId || !classId || !mosqueId || !period) return sendError(res, 400, "Verplichte velden voor opslaan rapport ontbreken.", null, req);
+
+    try {
+        const reportData = {
+            student_id: studentId,
+            class_id: classId,
+            mosque_id: mosqueId,
+            teacher_id: teacherId,
+            report_period: period,
+            grades: grades || {},
+            comments: comments || '',
+            updated_at: new Date()
+        };
+
+        const { data, error } = await supabase.from('student_reports')
+            .upsert(reportData, { onConflict: 'student_id, report_period' })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json({ success: true, message: 'Rapport succesvol opgeslagen.', data });
+    } catch (error) {
+        sendError(res, 500, 'Fout bij opslaan van rapport.', error.message, req);
+    }
+});
 // ===== QOR'AAN VOORTGANG BIJWERKEN =====
 app.post('/api/mosques/:mosqueId/students/:studentId/quran-progress', async (req, res) => {
   try {
