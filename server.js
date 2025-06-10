@@ -171,7 +171,103 @@ app.use(cors({
   },
   credentials: true
 }));
+
+// =============================================================
+// NIEUWE ROUTE: Stripe Webhook Handler
+// =============================================================
+// Belangrijk: De body parser voor DEZE specifieke route moet 'raw' zijn,
+// vóór de algemene express.json() middleware.
+app.post('/api/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    let event;
+
+    try {
+        // Verifieer dat het verzoek echt van Stripe komt
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+        console.error(`❌ Webhook signature verification failed.`, err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    console.log(`✅ Stripe Webhook ontvangen: ${event.type}`);
+
+    // Handel het specifieke event af
+    switch (event.type) {
+        // Dit event wordt ~3 dagen voordat de proefperiode afloopt, verstuurd
+        case 'customer.subscription.trial_will_end': {
+            const subscription = event.data.object;
+            const mosqueId = subscription.metadata.app_mosque_id;
+            
+            console.log(`[Webhook] Proefperiode voor moskee ${mosqueId} loopt bijna af.`);
+
+            // Zoek de admin van de moskee op in je database
+            const { data: adminUser } = await supabase
+                .from('users')
+                .select('name, email')
+                .eq('mosque_id', mosqueId)
+                .eq('role', 'admin')
+                .single();
+
+            if (adminUser) {
+                const subject = `Uw MijnLVS proefperiode loopt bijna af!`;
+                const body = `
+                    <p>Beste ${adminUser.name},</p>
+                    <p>Uw gratis proefperiode voor MijnLVS loopt over ongeveer 3 dagen af.</p>
+                    <p>Na de proefperiode wordt uw abonnement automatisch omgezet naar het "Professioneel" pakket en zal de eerste betaling worden afgeschreven.</p>
+                    <p>U hoeft niets te doen om van alle Pro-features te blijven genieten.</p>
+                    <p>Met vriendelijke groet,<br>Het MijnLVS Team</p>
+                `;
+                
+                // Verstuur de e-mail met je bestaande functie
+                await sendM365EmailInternal({
+                    to: adminUser.email,
+                    subject,
+                    body,
+                    mosqueId,
+                    emailType: 'trial_ending_notification'
+                });
+            }
+            break;
+        }
+
+        // Handel de succesvolle eerste betaling af (na de proefperiode)
+        case 'invoice.payment_succeeded': {
+            const invoice = event.data.object;
+            if (invoice.billing_reason === 'subscription_create' || invoice.billing_reason === 'subscription_cycle') {
+                const subscriptionId = invoice.subscription;
+                const { data: subscription } = await stripe.subscriptions.retrieve(subscriptionId);
+                const mosqueId = subscription.metadata.app_mosque_id;
+
+                console.log(`[Webhook] Succesvolle betaling voor moskee ${mosqueId}. Upgraden van 'trial' naar 'active'.`);
+                
+                // Update de status in je database
+                await supabase
+                    .from('mosques')
+                    .update({ subscription_status: 'active' })
+                    .eq('id', mosqueId);
+            }
+            break;
+        }
+        
+        // Voeg hier meer event handlers toe indien nodig (bv. voor opzeggingen)
+        // case 'customer.subscription.deleted':
+        //     // ...
+        //     break;
+
+        default:
+            console.log(`Unhandled event type ${event.type}`);
+    }
+
+    // Stuur een 200 OK terug naar Stripe om te bevestigen dat je de webhook hebt ontvangen
+    res.json({received: true});
+});
+
+
+
 app.use(express.json());
+app.use(checkSubscription);
 
 // ==================================
 // DEBUG ROUTE (VOEG HIER TOE)
@@ -255,7 +351,61 @@ app.use(async (req, res, next) => {
 // ==================================
 // EINDE AUTHENTICATIE MIDDLEWARE
 // ==================================
+const checkSubscription = async (req, res, next) => {
+    // Sla de check over voor publieke routes of essentiële login/registratie-routes.
+    const publicPaths = ['/api/auth/login', '/api/mosques/register', '/api/stripe-webhook'];
+    if (publicPaths.some(path => req.path.startsWith(path)) || req.path === '/api/health') {
+        return next();
+    }
+    
+    // Als er geen gebruiker is ingelogd, laat de normale autorisatie het afhandelen.
+    if (!req.user) {
+        return next();
+    }
 
+    try {
+        const { data: mosque, error } = await supabase
+            .from('mosques')
+            .select('subscription_status, trial_ends_at')
+            .eq('id', req.user.mosque_id)
+            .single();
+
+        // Als we de moskee niet kunnen vinden, is er een groter probleem, maar blokkeer niet per se.
+        if (error || !mosque) {
+            console.warn(`[Subscription Check] Kon moskee niet vinden voor user ${req.user.id}`);
+            return next();
+        }
+
+        // --- HIER ZIT DE LOGICA ---
+
+        // Check 1: Is de proefperiode verlopen?
+        if (mosque.subscription_status === 'trial' && new Date(mosque.trial_ends_at) < new Date()) {
+            // Blokkeer de API-call en stuur een duidelijke foutmelding.
+            return sendError(res, 403, "Uw proefperiode is verlopen. Upgrade uw account om door te gaan.", { code: 'TRIAL_EXPIRED' }, req);
+        }
+
+        // Check 2: Check voor limieten van het 'Basis' (gratis/demo) pakket
+        if (mosque.subscription_status === 'trial' || mosque.subscription_status === 'free') {
+            // Is de gebruiker een nieuwe leerling aan het toevoegen?
+            if (req.method === 'POST' && (req.path.startsWith('/api/students') || req.path.includes('/students'))) {
+                const { count } = await supabase.from('students').select('id', { count: 'exact' }).eq('mosque_id', req.user.mosque_id);
+                
+                // Blokkeer als de limiet (10) is bereikt.
+                if (count !== null && count >= 10) {
+                    return sendError(res, 403, "Limiet van 10 leerlingen bereikt voor uw proefperiode. Upgrade uw account om meer leerlingen toe te voegen.", { code: 'LIMIT_REACHED' }, req);
+                }
+            }
+        }
+        
+        // Alles is in orde, ga door naar de daadwerkelijke API-route.
+        return next();
+
+    } catch (error) {
+        console.error("[Subscription Middleware Error]", error);
+        // Bij een onverwachte fout, blokkeer de gebruiker niet, maar log de fout.
+        return next(); 
+    }
+};
 
 const sendError = (res, statusCode, message, details = null, req = null) => {
   const pathInfo = req ? `${req.method} ${req.originalUrl}` : '(Unknown path)';
@@ -1673,6 +1823,68 @@ app.post('/api/mosques/:mosqueId/students/quran-stats', async (req, res) => {
   }
 });
 
+// =============================================================
+// NIEUWE ROUTE: Maak een Stripe Checkout Sessie aan
+// =============================================================
+app.post('/api/stripe/create-checkout-session', async (req, res) => {
+    // Autorisatie: Controleer of de gebruiker is ingelogd
+    if (!req.user) {
+        return sendError(res, 401, "Je moet geregistreerd zijn om een abonnement te starten.", null, req);
+    }
+    
+    const { priceId } = req.body; // De prijs-ID van Stripe (bv. 'price_xxxx')
+    const userId = req.user.id; // De Supabase user ID
+    const userEmail = req.user.email;
+    const mosqueId = req.user.mosque_id;
+
+    if (!priceId) {
+        return sendError(res, 400, "Prijs-ID ontbreekt in het verzoek.", null, req);
+    }
+
+    try {
+        const session = await stripe.checkout.sessions.create({
+            // Modus 'subscription' is voor terugkerende betalingen
+            mode: 'subscription',
+            
+            // Toegestane betaalmethoden (iDEAL is cruciaal voor NL)
+            payment_method_types: ['card', 'ideal'],
+            
+            // De e-mail van de klant alvast invullen
+            customer_email: userEmail,
+            
+            // Het product dat de klant koopt
+            line_items: [
+                {
+                    price: priceId,
+                    quantity: 1,
+                },
+            ],
+            
+            // --- HIER IS DE MAGIE ---
+            subscription_data: {
+                // Stel de proefperiode programmatisch in
+                trial_period_days: 14, 
+                
+                // Koppel onze eigen data aan het Stripe-abonnement
+                // Dit is cruciaal om later te weten welk abonnement bij welke moskee hoort
+                metadata: { 
+                    supabase_user_id: userId,
+                    app_mosque_id: mosqueId,
+                }
+            },
+            
+            // De URLs waar Stripe de gebruiker naartoe stuurt na de transactie
+            success_url: `${process.env.FRONTEND_URL}/dashboard?payment_success=true`, // Redirect naar dashboard bij succes
+            cancel_url: `${process.env.FRONTEND_URL}/#prijzen`, // Terug naar prijzen bij annuleren
+        });
+
+        // Stuur de unieke URL van de betaalpagina terug naar de frontend
+        res.json({ sessionId: session.id, url: session.url });
+
+    } catch (error) {
+        sendError(res, 500, 'Fout bij het aanmaken van de Stripe checkout sessie.', error.message, req);
+    }
+});
 // EMAIL & CONFIG ROUTES (JOUW CODE)
 // =========================================================================================
 app.post('/api/send-email-m365', async (req, res) => {
