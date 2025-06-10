@@ -1791,6 +1791,61 @@ app.post('/api/send-email-m365', async (req, res) => {
 });
 
 // NIEUWE ROUTE: Verstuur email naar een specifieke ouder
+app.post('/api/email/send-generic', async (req, res) => {
+    // 1. Autorisatie: Controleer of er een gebruiker is ingelogd.
+    // Dit is de meest basale check. Iedereen die ingelogd is, mag in principe mailen.
+    if (!req.user) {
+        return sendError(res, 401, "Authenticatie vereist om e-mails te versturen.", null, req);
+    }
+
+    const sender = req.user; // De ingelogde gebruiker
+
+    try {
+        // 2. Validatie: Haal de benodigde data uit de request body.
+        const { recipientEmail, subject, body } = req.body;
+
+        if (!recipientEmail || !subject || !body) {
+            return sendError(res, 400, "Ontvanger, onderwerp en bericht zijn verplichte velden.", null, req);
+        }
+
+        // 3. Logica: Bereid de e-mail voor en verstuur deze.
+        // We voegen wat extra context toe aan de body, zodat de ontvanger weet wie de mail stuurde.
+        const emailBodyHtml = `
+            <p>Beste, </p>
+            <p>U heeft een bericht ontvangen van <strong>${sender.name}</strong> (${sender.email}) via het MijnLVS portaal.</p>
+            <hr>
+            <div style="margin-top: 1rem; padding: 1rem; border-left: 3px solid #059669; background-color: #f7fafc;">
+                ${body.replace(/\n/g, '<br>')}
+            </div>
+            <hr>
+            <p style="font-size: 0.8em; color: #666;">
+                Dit is een automatisch verzonden bericht. U kunt direct op deze e-mail reageren om te antwoorden aan ${sender.name}.
+            </p>
+        `;
+
+        // We gebruiken je bestaande, veilige interne email functie.
+        const emailResult = await sendM365EmailInternal({
+            to: recipientEmail,
+            subject: subject,
+            body: emailBodyHtml,
+            mosqueId: sender.mosque_id, // De moskee van de ingelogde gebruiker
+            emailType: 'm365_user_initiated_generic' // Voor logging doeleinden
+        });
+        
+        // 4. Response: Stuur een succes- of foutmelding terug naar de frontend.
+        if (emailResult.success) {
+            res.json({ success: true, message: `Email succesvol verstuurd naar ${recipientEmail}.` });
+        } else {
+            // De interne functie geeft al een gedetailleerde error, die sturen we door.
+            sendError(res, 500, `Email versturen mislukt: ${emailResult.error}`, emailResult.details, req);
+        }
+
+    } catch (error) {
+        // Vang onverwachte fouten op.
+        sendError(res, 500, 'Onverwachte serverfout bij versturen van e-mail.', error.message, req);
+    }
+});
+
 app.post('/api/email/send-to-parent', async (req, res) => {
     if (!req.user || req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
 
