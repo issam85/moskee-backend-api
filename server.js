@@ -141,18 +141,33 @@ async function testSupabaseConnection() {
 testSupabaseConnection();
 
 // Middleware
+// In server.js
+
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://vercel.app',
-    'https://*.vercel.app',
-    'https://moskee-systeem-iujmpp594-issams-projects-83c866b9.vercel.app',
-    'https://mijnlvs.nl',
-    'https://www.mijnlvs.nl',
-    'https://al-noor.mijnlvs.nl',
-    'https://al-hijra.mijnlvs.nl',
-    'https://register.mijnlvs.nl',
-  ],
+  // De 'origin' accepteert nu een functie die de herkomst controleert.
+  origin: function (origin, callback) {
+    // De lijst van expliciet toegestane origins
+    const whitelist = [
+      'http://localhost:3000',
+      'https://mijnlvs.nl',
+      'https://www.mijnlvs.nl',
+    ];
+
+    // De reguliere expressie die alle subdomeinen van mijnlvs.nl matcht,
+    // evenals de Vercel-deployment URLs.
+    const allowedOriginPatterns = [
+      /^https:\/\/[a-z0-9-]+\.mijnlvs\.nl$/, // Matcht test.mijnlvs.nl, al-hijra.mijnlvs.nl, etc.
+      /^https:\/\/moskee-systeem.*\.vercel\.app$/, // Matcht alle Vercel preview URLs
+    ];
+
+    // Toestaan als het in de whitelist staat, of matcht met een patroon, 
+    // of als het geen origin is (bv. server-naar-server requests, Postman)
+    if (!origin || whitelist.indexOf(origin) !== -1 || allowedOriginPatterns.some(pattern => pattern.test(origin))) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 app.use(express.json());
