@@ -142,7 +142,185 @@ async function testSupabaseConnection() {
 testSupabaseConnection();
 
 // Middleware   2
-// In server.js
+const sendError = (res, statusCode, message, details = null, req = null) => {
+  const pathInfo = req ? `${req.method} ${req.originalUrl}` : '(Unknown path)';
+  console.error(`Error ${statusCode} in ${pathInfo}: ${message}`, details || '');
+  res.status(statusCode).json({ success: false, error: message, details });
+};
+
+// =========================================================================================
+// INTERNE E-MAIL FUNCTIE (JOUW CODE)
+// =========================================================================================
+async function sendM365EmailInternal(emailDetails) {
+  const { to, subject, body, mosqueId, emailType = 'm365_app_email' } = emailDetails;
+  console.log(`[INTERNAL EMAIL START] Attempting to send ${emailType} to: ${to} for mosqueId: ${mosqueId}. Subject: ${subject.substring(0,50)}...`);
+
+  if (!to || !subject || !body || !mosqueId) {
+    console.error(`[INTERNAL EMAIL FAIL] Missing required parameters: to, subject, body, or mosqueId.`);
+    return { success: false, error: "Interne e-mail: verplichte parameters ontbreken." };
+  }
+
+  let mosqueConfig;
+  try {
+    const { data, error } = await supabase
+      .from('mosques')
+      .select('name, m365_tenant_id, m365_client_id, m365_sender_email, m365_client_secret, m365_configured')
+      .eq('id', mosqueId)
+      .single();
+    if (error) throw error;
+    if (!data) throw new Error("Moskee niet gevonden in database.");
+    mosqueConfig = data;
+  } catch (dbError) {
+    console.error(`[INTERNAL EMAIL FAIL] DB Error fetching mosque ${mosqueId}:`, dbError.message);
+    return { success: false, error: `Databasefout bij ophalen moskeeconfiguratie: ${dbError.message}` };
+  }
+
+  if (!mosqueConfig.m365_configured) {
+    console.warn(`[INTERNAL EMAIL WARN] M365 is not configured (m365_configured=false) for mosque ${mosqueId} (${mosqueConfig.name}). Email not sent.`);
+    return { success: false, error: "M365 is niet geconfigureerd voor deze moskee in de DB." };
+  }
+  if (!mosqueConfig.m365_tenant_id || !mosqueConfig.m365_client_id || !mosqueConfig.m365_client_secret || !mosqueConfig.m365_sender_email) {
+    console.error(`[INTERNAL EMAIL FAIL] M365 configuration incomplete for mosque ${mosqueId} (${mosqueConfig.name}).`);
+    return { success: false, error: "M365 configuratie is onvolledig in de DB (tenant, client, secret, of sender ontbreekt)." };
+  }
+
+  const actualTenantId = mosqueConfig.m365_tenant_id;
+  const actualClientId = mosqueConfig.m365_client_id;
+  const actualClientSecret = mosqueConfig.m365_client_secret;
+  const senderToUse = mosqueConfig.m365_sender_email;
+
+  console.log(`[INTERNAL EMAIL INFO] Using M365 config for ${mosqueConfig.name}: Sender: ${senderToUse}, Tenant: ${actualTenantId ? 'OK' : 'MISSING'}, ClientID: ${actualClientId ? 'OK' : 'MISSING'}, ClientSecret: ${actualClientSecret ? 'OK (length: ' + actualClientSecret.length + ')' : 'MISSING'}`);
+
+  const tokenUrl = `https://login.microsoftonline.com/${actualTenantId}/oauth2/v2.0/token`;
+  const tokenParams = new URLSearchParams();
+  tokenParams.append('client_id', actualClientId);
+  tokenParams.append('scope', 'https://graph.microsoft.com/.default');
+  tokenParams.append('client_secret', actualClientSecret);
+  tokenParams.append('grant_type', 'client_credentials');
+
+  let tokenResponseData;
+  console.log(`[INTERNAL EMAIL INFO] Requesting M365 token from ${tokenUrl} for client ${actualClientId}`);
+  try {
+    const response = await axios.post(tokenUrl, tokenParams, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    tokenResponseData = response.data;
+    console.log("[INTERNAL EMAIL INFO] M365 Token received successfully.");
+  } catch (error) {
+    const errorMsg = error.response?.data?.error_description || error.response?.data?.error?.message || error.message;
+    console.error("[INTERNAL EMAIL FAIL] M365 token request failed:", errorMsg, error.response?.data);
+     try {
+        await supabase.from('email_logs').insert([{
+          mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
+          email_type: `${emailType}_token_fail`, sent_status: 'failed', error_details: `Token Error: ${errorMsg}`, sent_at: new Date()
+        }]);
+    } catch (logError) { /* ignore */ }
+    return { success: false, error: `M365 token error: ${errorMsg}`, details: error.response?.data };
+  }
+
+  const accessToken = tokenResponseData.access_token;
+  if (!accessToken) {
+    console.error("[INTERNAL EMAIL FAIL] Access token was not found in the M365 token response.");
+    return { success: false, error: "M365 error: Access token missing in response" };
+  }
+
+  const sendMailUrl = `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`;
+  const emailPayloadGraph = {
+    message: { subject, body: { contentType: 'HTML', content: body }, toRecipients: [{ emailAddress: { address: to } }] },
+    saveToSentItems: 'true'
+  };
+
+  console.log(`[INTERNAL EMAIL INFO] Sending email via Graph API. From: ${senderToUse}, To: ${to}`);
+  let emailApiResponse;
+  try {
+    emailApiResponse = await axios.post(sendMailUrl, emailPayloadGraph, { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } });
+    const msRequestId = emailApiResponse.headers['request-id'];
+    console.log(`[INTERNAL EMAIL SUCCESS] Email sent via Graph API. MS Request ID: ${msRequestId}`);
+
+    try {
+      await supabase.from('email_logs').insert([{
+        mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
+        email_type: emailType, sent_status: 'sent', microsoft_message_id: msRequestId, sent_at: new Date()
+      }]);
+      console.log("[INTERNAL EMAIL INFO] Email attempt logged to Supabase 'email_logs' table as sent.");
+    } catch (logError) {
+      console.error("[INTERNAL EMAIL WARN] Failed to log successful email to Supabase 'email_logs':", logError.message);
+    }
+    return { success: true, messageId: msRequestId };
+
+  } catch (error) {
+    const errorMsg = error.response?.data?.error?.message || error.message;
+    console.error("[INTERNAL EMAIL FAIL] Graph API sendMail request failed:", errorMsg, error.response?.data);
+    try {
+        await supabase.from('email_logs').insert([{
+          mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
+          email_type: `${emailType}_send_fail`, sent_status: 'failed',
+          error_details: `Graph API Error: ${errorMsg}`, sent_at: new Date(),
+          microsoft_message_id: error.response?.headers?.['request-id'] 
+        }]);
+        console.log("[INTERNAL EMAIL INFO] Failed email attempt logged to Supabase 'email_logs' table.");
+    } catch (logError) {
+        console.error("[INTERNAL EMAIL WARN] Failed to log failed email to Supabase 'email_logs':", logError.message);
+    }
+    return { success: false, error: `Graph API sendMail error: ${errorMsg}`, details: error.response?.data };
+  }
+}
+// =========================================================================================
+// EINDE INTERNE E-MAIL FUNCTIE (JOUW CODE)
+// =========================================================================================
+const checkSubscription = async (req, res, next) => {
+    // Sla de check over voor publieke routes of essentiële login/registratie-routes.
+    const publicPaths = ['/api/auth/login', '/api/mosques/register', '/api/stripe-webhook'];
+    if (publicPaths.some(path => req.path.startsWith(path)) || req.path === '/api/health') {
+        return next();
+    }
+    
+    // Als er geen gebruiker is ingelogd, laat de normale autorisatie het afhandelen.
+    if (!req.user) {
+        return next();
+    }
+
+    try {
+        const { data: mosque, error } = await supabase
+            .from('mosques')
+            .select('subscription_status, trial_ends_at')
+            .eq('id', req.user.mosque_id)
+            .single();
+
+        // Als we de moskee niet kunnen vinden, is er een groter probleem, maar blokkeer niet per se.
+        if (error || !mosque) {
+            console.warn(`[Subscription Check] Kon moskee niet vinden voor user ${req.user.id}`);
+            return next();
+        }
+
+        // --- HIER ZIT DE LOGICA ---
+
+        // Check 1: Is de proefperiode verlopen?
+        if (mosque.subscription_status === 'trial' && new Date(mosque.trial_ends_at) < new Date()) {
+            // Blokkeer de API-call en stuur een duidelijke foutmelding.
+            return sendError(res, 403, "Uw proefperiode is verlopen. Upgrade uw account om door te gaan.", { code: 'TRIAL_EXPIRED' }, req);
+        }
+
+        // Check 2: Check voor limieten van het 'Basis' (gratis/demo) pakket
+        if (mosque.subscription_status === 'trial' || mosque.subscription_status === 'free') {
+            // Is de gebruiker een nieuwe leerling aan het toevoegen?
+            if (req.method === 'POST' && (req.path.startsWith('/api/students') || req.path.includes('/students'))) {
+                const { count } = await supabase.from('students').select('id', { count: 'exact' }).eq('mosque_id', req.user.mosque_id);
+                
+                // Blokkeer als de limiet (10) is bereikt.
+                if (count !== null && count >= 10) {
+                    return sendError(res, 403, "Limiet van 10 leerlingen bereikt voor uw proefperiode. Upgrade uw account om meer leerlingen toe te voegen.", { code: 'LIMIT_REACHED' }, req);
+                }
+            }
+        }
+        
+        // Alles is in orde, ga door naar de daadwerkelijke API-route.
+        return next();
+
+    } catch (error) {
+        console.error("[Subscription Middleware Error]", error);
+        // Bij een onverwachte fout, blokkeer de gebruiker niet, maar log de fout.
+        return next(); 
+    }
+};
 
 app.use(cors({
   // De 'origin' accepteert nu een functie die de herkomst controleert.
@@ -264,9 +442,16 @@ app.post('/api/stripe-webhook', express.raw({type: 'application/json'}), async (
     res.json({received: true});
 });
 
-
-
 app.use(express.json());
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'Server is running',
+    timestamp: new Date().toISOString(),
+    version: '2.2.7', 
+    supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
+  });
+});
 
 
 // ==================================
@@ -310,237 +495,6 @@ app.get('/api/debug-supabase-client', (req, res) => {
         keyUsedForInit_End: supabaseKey ? "..." + supabaseKey.substring(supabaseKey.length - 5) : "KEY_NOT_SET_AT_INIT_SCOPE"
     });
 });
-
-// ==================================
-// AUTHENTICATIE MIDDLEWARE (PRODUCTIE)
-// ==================================
-app.use(async (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    req.user = null; 
-
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.split(' ')[1];
-        try {
-            const { data: { user: supabaseUser }, error: authError } = await supabase.auth.getUser(token);
-
-            if (authError) {
-                console.warn(`[AUTH] Token validation failed for path ${req.path}: ${authError.message}`);
-            } else if (supabaseUser) {
-                const { data: appUser, error: appUserError } = await supabase
-                    .from('users') 
-                    .select('*') 
-                    .eq('id', supabaseUser.id) 
-                    .single();
-
-                if (appUserError) {
-                    console.error(`[AUTH] Error fetching app user from DB for Supabase ID ${supabaseUser.id}:`, appUserError.message);
-                } else if (appUser) {
-                    req.user = appUser; 
-                } else {
-                    console.warn(`[AUTH] App user not found in DB for Supabase user ID: ${supabaseUser.id}. Path: ${req.path}. Logging out Supabase session.`);
-                }
-            } else {
-                 console.warn(`[AUTH] No Supabase user found for token. Path: ${req.path}`);
-            }
-        } catch (e) {
-            console.error('[AUTH] Unexpected error during token processing:', e.message);
-        }
-    }
-    next();
-});
-// ==================================
-// EINDE AUTHENTICATIE MIDDLEWARE
-// ==================================
-const checkSubscription = async (req, res, next) => {
-    // Sla de check over voor publieke routes of essentiële login/registratie-routes.
-    const publicPaths = ['/api/auth/login', '/api/mosques/register', '/api/stripe-webhook'];
-    if (publicPaths.some(path => req.path.startsWith(path)) || req.path === '/api/health') {
-        return next();
-    }
-    
-    // Als er geen gebruiker is ingelogd, laat de normale autorisatie het afhandelen.
-    if (!req.user) {
-        return next();
-    }
-
-    try {
-        const { data: mosque, error } = await supabase
-            .from('mosques')
-            .select('subscription_status, trial_ends_at')
-            .eq('id', req.user.mosque_id)
-            .single();
-
-        // Als we de moskee niet kunnen vinden, is er een groter probleem, maar blokkeer niet per se.
-        if (error || !mosque) {
-            console.warn(`[Subscription Check] Kon moskee niet vinden voor user ${req.user.id}`);
-            return next();
-        }
-
-        // --- HIER ZIT DE LOGICA ---
-
-        // Check 1: Is de proefperiode verlopen?
-        if (mosque.subscription_status === 'trial' && new Date(mosque.trial_ends_at) < new Date()) {
-            // Blokkeer de API-call en stuur een duidelijke foutmelding.
-            return sendError(res, 403, "Uw proefperiode is verlopen. Upgrade uw account om door te gaan.", { code: 'TRIAL_EXPIRED' }, req);
-        }
-
-        // Check 2: Check voor limieten van het 'Basis' (gratis/demo) pakket
-        if (mosque.subscription_status === 'trial' || mosque.subscription_status === 'free') {
-            // Is de gebruiker een nieuwe leerling aan het toevoegen?
-            if (req.method === 'POST' && (req.path.startsWith('/api/students') || req.path.includes('/students'))) {
-                const { count } = await supabase.from('students').select('id', { count: 'exact' }).eq('mosque_id', req.user.mosque_id);
-                
-                // Blokkeer als de limiet (10) is bereikt.
-                if (count !== null && count >= 10) {
-                    return sendError(res, 403, "Limiet van 10 leerlingen bereikt voor uw proefperiode. Upgrade uw account om meer leerlingen toe te voegen.", { code: 'LIMIT_REACHED' }, req);
-                }
-            }
-        }
-        
-        // Alles is in orde, ga door naar de daadwerkelijke API-route.
-        return next();
-
-    } catch (error) {
-        console.error("[Subscription Middleware Error]", error);
-        // Bij een onverwachte fout, blokkeer de gebruiker niet, maar log de fout.
-        return next(); 
-    }
-};
-
-const sendError = (res, statusCode, message, details = null, req = null) => {
-  const pathInfo = req ? `${req.method} ${req.originalUrl}` : '(Unknown path)';
-  console.error(`Error ${statusCode} in ${pathInfo}: ${message}`, details || '');
-  res.status(statusCode).json({ success: false, error: message, details });
-};
-
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'Server is running',
-    timestamp: new Date().toISOString(),
-    version: '2.2.7', 
-    supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
-  });
-});
-app.use(checkSubscription);
-// =========================================================================================
-// INTERNE E-MAIL FUNCTIE (JOUW CODE)
-// =========================================================================================
-async function sendM365EmailInternal(emailDetails) {
-  const { to, subject, body, mosqueId, emailType = 'm365_app_email' } = emailDetails;
-  console.log(`[INTERNAL EMAIL START] Attempting to send ${emailType} to: ${to} for mosqueId: ${mosqueId}. Subject: ${subject.substring(0,50)}...`);
-
-  if (!to || !subject || !body || !mosqueId) {
-    console.error(`[INTERNAL EMAIL FAIL] Missing required parameters: to, subject, body, or mosqueId.`);
-    return { success: false, error: "Interne e-mail: verplichte parameters ontbreken." };
-  }
-
-  let mosqueConfig;
-  try {
-    const { data, error } = await supabase
-      .from('mosques')
-      .select('name, m365_tenant_id, m365_client_id, m365_sender_email, m365_client_secret, m365_configured')
-      .eq('id', mosqueId)
-      .single();
-    if (error) throw error;
-    if (!data) throw new Error("Moskee niet gevonden in database.");
-    mosqueConfig = data;
-  } catch (dbError) {
-    console.error(`[INTERNAL EMAIL FAIL] DB Error fetching mosque ${mosqueId}:`, dbError.message);
-    return { success: false, error: `Databasefout bij ophalen moskeeconfiguratie: ${dbError.message}` };
-  }
-
-  if (!mosqueConfig.m365_configured) {
-    console.warn(`[INTERNAL EMAIL WARN] M365 is not configured (m365_configured=false) for mosque ${mosqueId} (${mosqueConfig.name}). Email not sent.`);
-    return { success: false, error: "M365 is niet geconfigureerd voor deze moskee in de DB." };
-  }
-  if (!mosqueConfig.m365_tenant_id || !mosqueConfig.m365_client_id || !mosqueConfig.m365_client_secret || !mosqueConfig.m365_sender_email) {
-    console.error(`[INTERNAL EMAIL FAIL] M365 configuration incomplete for mosque ${mosqueId} (${mosqueConfig.name}).`);
-    return { success: false, error: "M365 configuratie is onvolledig in de DB (tenant, client, secret, of sender ontbreekt)." };
-  }
-
-  const actualTenantId = mosqueConfig.m365_tenant_id;
-  const actualClientId = mosqueConfig.m365_client_id;
-  const actualClientSecret = mosqueConfig.m365_client_secret;
-  const senderToUse = mosqueConfig.m365_sender_email;
-
-  console.log(`[INTERNAL EMAIL INFO] Using M365 config for ${mosqueConfig.name}: Sender: ${senderToUse}, Tenant: ${actualTenantId ? 'OK' : 'MISSING'}, ClientID: ${actualClientId ? 'OK' : 'MISSING'}, ClientSecret: ${actualClientSecret ? 'OK (length: ' + actualClientSecret.length + ')' : 'MISSING'}`);
-
-  const tokenUrl = `https://login.microsoftonline.com/${actualTenantId}/oauth2/v2.0/token`;
-  const tokenParams = new URLSearchParams();
-  tokenParams.append('client_id', actualClientId);
-  tokenParams.append('scope', 'https://graph.microsoft.com/.default');
-  tokenParams.append('client_secret', actualClientSecret);
-  tokenParams.append('grant_type', 'client_credentials');
-
-  let tokenResponseData;
-  console.log(`[INTERNAL EMAIL INFO] Requesting M365 token from ${tokenUrl} for client ${actualClientId}`);
-  try {
-    const response = await axios.post(tokenUrl, tokenParams, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    tokenResponseData = response.data;
-    console.log("[INTERNAL EMAIL INFO] M365 Token received successfully.");
-  } catch (error) {
-    const errorMsg = error.response?.data?.error_description || error.response?.data?.error?.message || error.message;
-    console.error("[INTERNAL EMAIL FAIL] M365 token request failed:", errorMsg, error.response?.data);
-     try {
-        await supabase.from('email_logs').insert([{
-          mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
-          email_type: `${emailType}_token_fail`, sent_status: 'failed', error_details: `Token Error: ${errorMsg}`, sent_at: new Date()
-        }]);
-    } catch (logError) { /* ignore */ }
-    return { success: false, error: `M365 token error: ${errorMsg}`, details: error.response?.data };
-  }
-
-  const accessToken = tokenResponseData.access_token;
-  if (!accessToken) {
-    console.error("[INTERNAL EMAIL FAIL] Access token was not found in the M365 token response.");
-    return { success: false, error: "M365 error: Access token missing in response" };
-  }
-
-  const sendMailUrl = `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`;
-  const emailPayloadGraph = {
-    message: { subject, body: { contentType: 'HTML', content: body }, toRecipients: [{ emailAddress: { address: to } }] },
-    saveToSentItems: 'true'
-  };
-
-  console.log(`[INTERNAL EMAIL INFO] Sending email via Graph API. From: ${senderToUse}, To: ${to}`);
-  let emailApiResponse;
-  try {
-    emailApiResponse = await axios.post(sendMailUrl, emailPayloadGraph, { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } });
-    const msRequestId = emailApiResponse.headers['request-id'];
-    console.log(`[INTERNAL EMAIL SUCCESS] Email sent via Graph API. MS Request ID: ${msRequestId}`);
-
-    try {
-      await supabase.from('email_logs').insert([{
-        mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
-        email_type: emailType, sent_status: 'sent', microsoft_message_id: msRequestId, sent_at: new Date()
-      }]);
-      console.log("[INTERNAL EMAIL INFO] Email attempt logged to Supabase 'email_logs' table as sent.");
-    } catch (logError) {
-      console.error("[INTERNAL EMAIL WARN] Failed to log successful email to Supabase 'email_logs':", logError.message);
-    }
-    return { success: true, messageId: msRequestId };
-
-  } catch (error) {
-    const errorMsg = error.response?.data?.error?.message || error.message;
-    console.error("[INTERNAL EMAIL FAIL] Graph API sendMail request failed:", errorMsg, error.response?.data);
-    try {
-        await supabase.from('email_logs').insert([{
-          mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
-          email_type: `${emailType}_send_fail`, sent_status: 'failed',
-          error_details: `Graph API Error: ${errorMsg}`, sent_at: new Date(),
-          microsoft_message_id: error.response?.headers?.['request-id'] 
-        }]);
-        console.log("[INTERNAL EMAIL INFO] Failed email attempt logged to Supabase 'email_logs' table.");
-    } catch (logError) {
-        console.error("[INTERNAL EMAIL WARN] Failed to log failed email to Supabase 'email_logs':", logError.message);
-    }
-    return { success: false, error: `Graph API sendMail error: ${errorMsg}`, details: error.response?.data };
-  }
-}
-// =========================================================================================
-// EINDE INTERNE E-MAIL FUNCTIE (JOUW CODE)
-// =========================================================================================
-
 // ======================
 // AUTHENTICATION ROUTES (AANGEPAST voor Supabase Auth)
 // ======================
@@ -562,7 +516,6 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ success: true, user: userWithoutPassword });
   } catch (error) { console.error("Login error (outer catch):", error); sendError(res, 500, 'Interne serverfout tijdens login.', error.message, req); }
 });
-
 // ======================
 // REGISTRATION ROUTE (AANGEPAST voor Supabase Auth)
 // ======================
@@ -688,8 +641,6 @@ if (existingAuthUser) {
     sendError(res, error.code === '23505' || (error.message && error.message.includes('already registered')) ? 409 : (error.status || 400), error.message || 'Fout bij registratie.', error.details || error.hint || error, req); 
   }
 });
-
-
 // ======================
 // MOSQUE ROUTES (JOUW CODE)
 // ======================
@@ -709,6 +660,51 @@ app.get('/api/mosque/:subdomain', async (req, res) => {
     sendError(res, 500, 'Fout bij ophalen moskee.', error.message, req);
   }
 });
+
+// ==================================
+// AUTHENTICATIE MIDDLEWARE (PRODUCTIE)
+// ==================================
+app.use(async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    req.user = null; 
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const { data: { user: supabaseUser }, error: authError } = await supabase.auth.getUser(token);
+
+            if (authError) {
+                console.warn(`[AUTH] Token validation failed for path ${req.path}: ${authError.message}`);
+            } else if (supabaseUser) {
+                const { data: appUser, error: appUserError } = await supabase
+                    .from('users') 
+                    .select('*') 
+                    .eq('id', supabaseUser.id) 
+                    .single();
+
+                if (appUserError) {
+                    console.error(`[AUTH] Error fetching app user from DB for Supabase ID ${supabaseUser.id}:`, appUserError.message);
+                } else if (appUser) {
+                    req.user = appUser; 
+                } else {
+                    console.warn(`[AUTH] App user not found in DB for Supabase user ID: ${supabaseUser.id}. Path: ${req.path}. Logging out Supabase session.`);
+                }
+            } else {
+                 console.warn(`[AUTH] No Supabase user found for token. Path: ${req.path}`);
+            }
+        } catch (e) {
+            console.error('[AUTH] Unexpected error during token processing:', e.message);
+        }
+    }
+    next();
+});
+// ==================================
+// EINDE AUTHENTICATIE MIDDLEWARE
+// ==================================
+
+app.use(checkSubscription);
+
+
 app.put('/api/mosques/:mosqueId', async (req, res) => {
     // JOUW CODE
     try {
