@@ -141,7 +141,7 @@ async function testSupabaseConnection() {
 
 testSupabaseConnection();
 
-// Middleware
+// Middleware   2
 // In server.js
 
 app.use(cors({
