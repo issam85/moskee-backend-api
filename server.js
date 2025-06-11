@@ -267,7 +267,7 @@ app.post('/api/stripe-webhook', express.raw({type: 'application/json'}), async (
 
 
 app.use(express.json());
-app.use(checkSubscription);
+
 
 // ==================================
 // DEBUG ROUTE (VOEG HIER TOE)
@@ -421,7 +421,7 @@ app.get('/api/health', (req, res) => {
     supabase_connection_test_result: 'Attempted at startup, check logs for [DB STARTUP TEST]'
   });
 });
-
+app.use(checkSubscription);
 // =========================================================================================
 // INTERNE E-MAIL FUNCTIE (JOUW CODE)
 // =========================================================================================
@@ -582,19 +582,22 @@ app.post('/api/mosques/register', async (req, res) => {
     // Check if email already exists in auth system - SUPABASE V2 COMPATIBLE
     try { 
       console.log(`[REGISTER] Checking if email ${normalizedAdminEmail} already exists in auth system...`);
-      const { data: { users }, error } = await supabase.auth.admin.listUsers();
-      
+      // NEW, MORE RELIABLE CODE
+      const { data: existingAuthUser, error } = await supabase
+          .from('users') // Querying the users table directly
+          .select('id, email')
+          .eq('email', normalizedAdminEmail)
+          .maybeSingle(); // Returns one user or null, no error if not found
+
       if (error) {
-        console.error("Error checking existing auth users for registration:", error);
-        return sendError(res, 500, "Fout bij controleren bestaande auth gebruiker.", error.message, req);
+          console.error("Error checking existing auth users for registration:", error);
+          return sendError(res, 500, "Fout bij controleren bestaande gebruiker.", error.message, req);
       }
-      
-      // Check if email already exists in the users list
-      const existingAuthUser = users?.find(user => user.email === normalizedAdminEmail);
-      if (existingAuthUser) {
-        console.log(`[REGISTER] Email ${normalizedAdminEmail} already exists in auth system.`);
-        return sendError(res, 409, 'Dit emailadres is al geregistreerd in het authenticatiesysteem.', null, req);
-      }
+
+if (existingAuthUser) {
+    console.log(`[REGISTER] Email ${normalizedAdminEmail} already exists.`);
+    return sendError(res, 409, 'Dit emailadres is al geregistreerd.', null, req);
+}
       
       console.log(`[REGISTER] Email ${normalizedAdminEmail} is available for registration.`);
     } catch (error) { 
