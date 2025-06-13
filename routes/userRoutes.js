@@ -6,7 +6,9 @@ const { sendM365EmailInternal } = require('../services/emailService');
 
 // GET all users for a mosque
 router.get('/mosque/:mosqueId', async (req, res) => {
-    if (req.user.role !== 'admin' || req.user.mosque_id !== req.params.mosqueId) {
+    // Iedereen (admin, teacher, parent) van de juiste moskee mag de gebruikerslijst ophalen.
+    // De frontend filtert wat er getoond wordt.
+    if (!req.user || req.user.mosque_id !== req.params.mosqueId) {
         return sendError(res, 403, "Niet geautoriseerd.", null, req);
     }
     try {
@@ -14,7 +16,7 @@ router.get('/mosque/:mosqueId', async (req, res) => {
         if (req.query.role) {
             query = query.eq('role', req.query.role);
         }
-        const { data, error } = await query;
+        const { data, error } = await query.order('name', { ascending: true });
         if (error) throw error;
         res.json(data);
     } catch (error) {

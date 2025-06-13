@@ -6,8 +6,9 @@ const { calculateAmountDueFromStaffel } = require('../services/calculationServic
 
 // GET all students for a mosque
 router.get('/mosque/:mosqueId', async (req, res) => {
-    if (req.user.mosque_id !== req.params.mosqueId && req.user.role !== 'superadmin') {
-        return sendError(res, 403, "Niet geautoriseerd voor data van deze moskee.", null, req);
+    // Iedereen van de juiste moskee mag de studentenlijst ophalen.
+    if (!req.user || req.user.mosque_id !== req.params.mosqueId) {
+        return sendError(res, 403, "Niet geautoriseerd.", null, req);
     }
     try {
         const { data, error } = await supabase

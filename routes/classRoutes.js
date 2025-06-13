@@ -5,16 +5,16 @@ const { sendError } = require('../utils/errorHelper');
 
 // GET all classes for a mosque
 router.get('/mosque/:mosqueId', async (req, res) => {
-    const { mosqueId } = req.params;
-    if (req.user.mosque_id !== mosqueId && req.user.role !== 'superadmin') {
+    // Iedereen van de juiste moskee mag de klassenlijst ophalen.
+    if (!req.user || req.user.mosque_id !== req.params.mosqueId) {
         return sendError(res, 403, "Niet geautoriseerd.", null, req);
     }
     try {
         const { data, error } = await supabase
             .from('classes')
             .select('*, teacher:teacher_id(id, name), students(count)')
-            .eq('mosque_id', mosqueId)
-            .eq('active', true) // <-- BELANGRIJKE TOEVOEGING
+            .eq('mosque_id', req.params.mosqueId)
+            .eq('active', true) // Standaard alleen actieve klassen
             .order('name', { ascending: true });
         if (error) throw error;
         res.json(data);
