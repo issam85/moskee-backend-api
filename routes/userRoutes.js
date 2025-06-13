@@ -1,13 +1,16 @@
-// routes/userRoutes.js
+// routes/userRoutes.js - V3.1 - Definitieve versie
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
 const { sendM365EmailInternal } = require('../services/emailService');
 
+// Helper functie om een willekeurig wachtwoord te genereren.
+const generateTempPassword = () => {
+    return Math.random().toString(36).slice(2, 10) + 'A!b2'; // Genereert een 12-karakter wachtwoord
+}
+
 // GET all users for a mosque
 router.get('/mosque/:mosqueId', async (req, res) => {
-    // Iedereen (admin, teacher, parent) van de juiste moskee mag de gebruikerslijst ophalen.
-    // De frontend filtert wat er getoond wordt.
     if (!req.user || req.user.mosque_id !== req.params.mosqueId) {
         return sendError(res, 403, "Niet geautoriseerd.", null, req);
     }
@@ -31,7 +34,6 @@ router.get('/:id', async (req, res) => {
         const { data, error } = await supabase.from('users').select('*').eq('id', id).single();
         if (error || !data) return sendError(res, 404, `Gebruiker niet gevonden.`, null, req);
         
-        // Autorisatie: Admin van dezelfde moskee, of gebruiker zelf
         const isAuthorized = (req.user.role === 'admin' && req.user.mosque_id === data.mosque_id) || (req.user.id === id);
         if (!isAuthorized) return sendError(res, 403, "Niet geautoriseerd.", null, req);
 
@@ -41,42 +43,69 @@ router.get('/:id', async (req, res) => {
     }
 });
 
+// ==========================================================
+// HIER ZIT DE CRUCIALE CORRECTIE
+// ==========================================================
 // POST (create) a new user
 router.post('/', async (req, res) => {
     if (req.user.role !== 'admin') return sendError(res, 403, "Niet geautoriseerd.", null, req);
+    
     try {
-        const { mosque_id, email, name, role, phone, address, city, zipcode, password, sendWelcomeEmail = true } = req.body;
-        if (req.user.mosque_id !== mosque_id) return sendError(res, 403, "U kunt alleen gebruikers toevoegen aan uw eigen moskee.", null, req);
-        if (!email || !name || !role || !password) return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
-        if (password.length < 8) return sendError(res, 400, "Wachtwoord moet minimaal 8 karakters lang zijn.", null, req);
+        // Het 'password' veld wordt NIET meer uit de body gelezen.
+        const { mosque_id, email, name, role, phone, address, city, zipcode, sendWelcomeEmail = true } = req.body;
 
+        if (req.user.mosque_id !== mosque_id) return sendError(res, 403, "U kunt alleen gebruikers toevoegen aan uw eigen moskee.", null, req);
+        if (!email || !name || !role) return sendError(res, 400, "Email, naam en rol zijn verplicht.", null, req);
+
+        // 1. Genereer hier een veilig, tijdelijk wachtwoord
+        const tempPassword = generateTempPassword();
         const normalizedEmail = email.toLowerCase().trim();
 
-        const { data: { user: supabaseAuthUser }, error: authError } = await supabase.auth.admin.createUser({ email: normalizedEmail, password, email_confirm: true });
+        // 2. Maak de Supabase Auth gebruiker aan met het tijdelijke wachtwoord
+        const { data: { user: supabaseAuthUser }, error: authError } = await supabase.auth.admin.createUser({ 
+            email: normalizedEmail, 
+            password: tempPassword, 
+            email_confirm: true 
+        });
+
         if (authError) {
             if (authError.message.includes('User already registered')) return sendError(res, 409, `Email ${normalizedEmail} is al geregistreerd.`, null, req);
             return sendError(res, 500, `Fout bij aanmaken auth user: ${authError.message}`, authError, req);
         }
 
-        const appUserData = { id: supabaseAuthUser.id, mosque_id, email: normalizedEmail, name, role, phone, address, city, zipcode, amount_due: role === 'parent' ? 0 : null, is_temporary_password: true };
+        // 3. Stel de data voor de 'users' tabel samen ZONDER password_hash
+        const appUserData = { 
+            id: supabaseAuthUser.id, 
+            mosque_id, 
+            email: normalizedEmail, 
+            name, 
+            role, 
+            phone, 
+            address, 
+            city, 
+            zipcode, 
+            amount_due: role === 'parent' ? 0 : null, 
+            is_temporary_password: true 
+        };
+
         const { data: appUser, error: appUserError } = await supabase.from('users').insert(appUserData).select().single();
         if (appUserError) {
             await supabase.auth.admin.deleteUser(supabaseAuthUser.id); // Rollback
             throw appUserError;
         }
 
-        if (appUser.role === 'parent' && sendWelcomeEmail) {
-            // Logica voor welkomstmail (asynchroon)
-            sendWelcomeEmailForNewUser(appUser, password, req);
+        // 4. Stuur eventueel de welkomstmail met het gegenereerde wachtwoord
+        if (sendWelcomeEmail) {
+            await sendWelcomeEmailForNewUser(appUser, tempPassword);
         }
 
         res.status(201).json({ success: true, user: appUser });
     } catch (error) {
-        sendError(res, error.code === '23505' ? 409 : 500, error.message, error, req);
+        // Deze catch-all vangt nu zowel de DB-fout als andere fouten op.
+        const isDuplicateError = error.code === '23505' || (error.message && error.message.includes('duplicate key'));
+        sendError(res, isDuplicateError ? 409 : 500, error.message, error, req);
     }
 });
-
-// PUT (update) a user
 // PUT (update) a user
 router.put('/:id', async (req, res) => {
     try {
@@ -181,24 +210,24 @@ router.post('/:userId/send-new-password', async (req, res) => {
 });
 
 // Helper for sending welcome email
-async function sendWelcomeEmailForNewUser(appUser, plainTextPassword, req) {
+async function sendWelcomeEmailForNewUser(appUser, plainTextPassword) {
     try {
         const { data: mosque } = await supabase.from('mosques').select('name, subdomain, m365_configured').eq('id', appUser.mosque_id).single();
         if (!mosque || !mosque.m365_configured) {
-            console.warn(`[POST /api/users] M365 not configured for mosque ${appUser.mosque_id}. Welcome email for ${appUser.email} NOT sent.`);
+            console.warn(`[userRoutes] M365 not configured for mosque ${appUser.mosque_id}. Welcome email for ${appUser.email} NOT sent.`);
             return;
         }
-        const subject = `Welkom bij ${mosque.name}!`;
+        const subject = `Welkom bij ${mosque.name}! Uw account is aangemaakt`;
         const loginLink = `https://${mosque.subdomain}.mijnlvs.nl`;
-        const body = `<p>Beste ${appUser.name},</p><p>Uw account is aangemaakt.</p><p>Email: ${appUser.email}<br>Tijdelijk wachtwoord: <strong>${plainTextPassword}</strong></p><p>Log in via <a href="${loginLink}">${loginLink}</a>.</p>`;
+        const body = `<p>Beste ${appUser.name},</p><p>Uw account is aangemaakt.</p><p>Email: ${appUser.email}<br>Tijdelijk wachtwoord: <strong>${plainTextPassword}</strong></p><p>Log in via <a href="${loginLink}">${loginLink}</a> en wijzig uw wachtwoord.</p>`;
         
-        // Fire and forget
-        sendM365EmailInternal({ to: appUser.email, subject, body, mosqueId: appUser.mosque_id, emailType: 'm365_parent_welcome' })
-            .then(result => console.log(`Welcome email to ${appUser.email} queued. Success: ${result.success}`))
-            .catch(err => console.error(`Error queuing welcome email for ${appUser.email}:`, err));
+        // Fire and forget, geen 'await' nodig hier
+        sendM365EmailInternal({ to: appUser.email, subject, body, mosqueId: appUser.mosque_id, emailType: `m365_welcome_${appUser.role}` })
+            .then(result => console.log(`[userRoutes] Welcome email to ${appUser.email} queued. Success: ${result.success}`))
+            .catch(err => console.error(`[userRoutes] Error queuing welcome email for ${appUser.email}:`, err));
 
     } catch(e) {
-        console.error(`Failed to send welcome email for ${appUser.email}:`, e.message);
+        console.error(`[userRoutes] Failed to send welcome email for ${appUser.email}:`, e.message);
     }
 }
 
