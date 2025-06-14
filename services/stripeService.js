@@ -1,4 +1,4 @@
-// services/stripeService.js - Complete versie met uitgebreide webhook handling
+// services/stripeService.js - Geautomatiseerde webhook handling met buffering en linking
 const { stripe } = require('../config/stripe');
 const { supabase } = require('../config/database');
 const { sendM365EmailInternal } = require('./emailService');
@@ -109,53 +109,182 @@ const handleStripeWebhook = async (req, res) => {
     }
 };
 
-// Handle checkout session completed
+// Handle checkout session completed - KERNFUNCTIE VAN AUTOMATION
 const handleCheckoutSessionCompleted = async (session) => {
+    console.log(`[Webhook] Processing checkout session: ${session.id}`);
+    
     const subscriptionId = session.subscription;
     const customerId = session.customer;
-    
+    const customerEmail = session.customer_email;
+
     if (!subscriptionId) {
-        console.warn('[Stripe Webhook] No subscription ID in checkout session');
+        console.warn('[Webhook] No subscription ID in checkout session');
         return;
     }
 
     // Haal subscription details op
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-    const mosqueId = subscription.metadata.app_mosque_id;
-    
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscriptionId}`);
-        return;
+    const metadata = subscription.metadata;
+    const trackingId = metadata.tracking_id;
+    const mosqueId = metadata.app_mosque_id;
+
+    // Store in pending_payments tabel voor tracking
+    const pendingPaymentData = {
+        tracking_id: trackingId,
+        stripe_session_id: session.id,
+        stripe_customer_id: customerId,
+        stripe_subscription_id: subscriptionId,
+        customer_email: customerEmail,
+        amount: (session.amount_total || 0) / 100,
+        currency: session.currency || 'eur',
+        metadata: metadata,
+        status: 'pending'
+    };
+
+    try {
+        // Insert pending payment record
+        const { error: insertError } = await supabase
+            .from('pending_payments')
+            .insert(pendingPaymentData);
+            
+        if (insertError) {
+            // Als het al bestaat (duplicate tracking_id), update dan
+            if (insertError.code === '23505') { // unique violation
+                await supabase
+                    .from('pending_payments')
+                    .update({
+                        stripe_session_id: session.id,
+                        stripe_customer_id: customerId,
+                        stripe_subscription_id: subscriptionId,
+                        customer_email: customerEmail,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('tracking_id', trackingId);
+                console.log(`[Webhook] Updated existing pending payment for tracking ID: ${trackingId}`);
+            } else {
+                throw insertError;
+            }
+        } else {
+            console.log(`[Webhook] ✅ Stored pending payment for tracking ID: ${trackingId}`);
+        }
+    } catch (error) {
+        console.error('[Webhook] Error storing pending payment:', error);
+        // Continue met processing, ook al ging opslaan fout
     }
 
-    // Update moskee met Stripe gegevens
-    const { error } = await supabase
-        .from('mosques')
-        .update({ 
-            stripe_customer_id: customerId,
-            stripe_subscription_id: subscriptionId,
-            subscription_status: subscription.status,
-            trial_ends_at: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null,
+    // Als moskee ID bekend is (ingelogde gebruiker), direct verwerken
+    if (mosqueId && mosqueId !== 'undefined' && mosqueId !== 'null') {
+        console.log(`[Webhook] Direct linking for known mosque: ${mosqueId}`);
+        await linkPaymentToMosque(mosqueId, pendingPaymentData);
+    } else {
+        // Buffer webhook event voor later processing bij anonieme betaling
+        console.log(`[Webhook] Buffering event for anonymous payment, email: ${customerEmail}`);
+        await bufferWebhookEvent(session, subscription, customerEmail);
+        
+        // Probeer immediate linking op basis van recent geregistreerde moskeeën
+        await attemptImmediateLinking(customerEmail, trackingId, pendingPaymentData);
+    }
+};
+
+// Probeer immediate linking voor recent geregistreerde moskeeën
+const attemptImmediateLinking = async (customerEmail, trackingId, paymentData) => {
+    try {
+        // Zoek naar moskeeën geregistreerd in de laatste 30 minuten met dit email
+        const { data: recentMosques, error } = await supabase
+            .from('mosques')
+            .select('id, admin_email, name')
+            .eq('admin_email', customerEmail)
+            .gte('created_at', new Date(Date.now() - 1800000).toISOString()) // Laatste 30 minuten
+            .order('created_at', { ascending: false });
+
+        if (!error && recentMosques && recentMosques.length > 0) {
+            const mosque = recentMosques[0]; // Neem de meest recente
+            console.log(`[Webhook] Found recent mosque registration for ${customerEmail}: ${mosque.name}`);
+            
+            await linkPaymentToMosque(mosque.id, paymentData);
+            
+            // Update pending payment met mosque link
+            await supabase
+                .from('pending_payments')
+                .update({ 
+                    mosque_id: mosque.id,
+                    status: 'linked'
+                })
+                .eq('stripe_subscription_id', paymentData.stripe_subscription_id);
+        } else {
+            console.log(`[Webhook] No recent mosque registration found for ${customerEmail}`);
+        }
+    } catch (error) {
+        console.error('[Webhook] Error in immediate linking attempt:', error);
+    }
+};
+
+// Link payment direct aan moskee
+const linkPaymentToMosque = async (mosqueId, paymentData) => {
+    try {
+        // Update moskee met Stripe gegevens
+        const updateData = {
+            stripe_customer_id: paymentData.stripe_customer_id,
+            stripe_subscription_id: paymentData.stripe_subscription_id,
+            subscription_status: 'active', // Direct actief na betaling
+            trial_ends_at: null, // Remove trial restriction
             updated_at: new Date().toISOString()
-        })
-        .eq('id', mosqueId);
-    
-    if (error) {
-        throw new Error(`Failed to update mosque ${mosqueId}: ${error.message}`);
-    }
+        };
 
-    console.log(`✅ [Stripe Webhook] Mosque ${mosqueId} updated with subscription ${subscriptionId}`);
-    
-    // Verstuur welkomst e-mail
-    await sendWelcomeEmail(mosqueId, subscription);
+        const { error: updateError } = await supabase
+            .from('mosques')
+            .update(updateData)
+            .eq('id', mosqueId);
+
+        if (updateError) {
+            throw updateError;
+        }
+
+        console.log(`✅ [Webhook] Successfully linked payment to mosque ${mosqueId}`);
+        
+        // Verstuur welkomst email
+        await sendWelcomeEmail(mosqueId, paymentData.stripe_subscription_id);
+        
+    } catch (error) {
+        console.error('[Webhook] Error linking payment to mosque:', error);
+        throw error;
+    }
+};
+
+// Buffer webhook event voor later processing
+const bufferWebhookEvent = async (session, subscription, customerEmail) => {
+    try {
+        const bufferedEvent = {
+            stripe_event_id: `session_${session.id}`,
+            event_type: 'checkout.session.completed',
+            stripe_session_id: session.id,
+            stripe_subscription_id: subscription.id,
+            customer_email: customerEmail,
+            metadata: subscription.metadata,
+            event_data: { session, subscription },
+            processed: false
+        };
+
+        const { error } = await supabase
+            .from('webhook_events_buffer')
+            .insert(bufferedEvent);
+            
+        if (error) {
+            throw error;
+        }
+
+        console.log(`[Webhook Buffer] ✅ Stored event for email: ${customerEmail}`);
+    } catch (error) {
+        console.error('[Webhook Buffer] Error storing buffered event:', error);
+    }
 };
 
 // Handle subscription created
 const handleSubscriptionCreated = async (subscription) => {
     const mosqueId = subscription.metadata.app_mosque_id;
     
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
+    if (!mosqueId || mosqueId === 'undefined' || mosqueId === 'null') {
+        console.warn(`[Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
         return;
     }
 
@@ -179,8 +308,8 @@ const handleSubscriptionCreated = async (subscription) => {
 const handleSubscriptionUpdated = async (subscription) => {
     const mosqueId = subscription.metadata.app_mosque_id;
     
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
+    if (!mosqueId || mosqueId === 'undefined' || mosqueId === 'null') {
+        console.warn(`[Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
         return;
     }
 
@@ -192,6 +321,9 @@ const handleSubscriptionUpdated = async (subscription) => {
     // Update trial end date if it exists
     if (subscription.trial_end) {
         updateData.trial_ends_at = new Date(subscription.trial_end * 1000);
+    } else if (subscription.status === 'active') {
+        // Remove trial restriction when subscription becomes active
+        updateData.trial_ends_at = null;
     }
 
     const { error } = await supabase
@@ -215,8 +347,8 @@ const handleSubscriptionUpdated = async (subscription) => {
 const handleTrialWillEnd = async (subscription) => {
     const mosqueId = subscription.metadata.app_mosque_id;
     
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
+    if (!mosqueId || mosqueId === 'undefined' || mosqueId === 'null') {
+        console.warn(`[Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
         return;
     }
 
@@ -231,8 +363,8 @@ const handlePaymentSucceeded = async (invoice) => {
     const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
     const mosqueId = subscription.metadata.app_mosque_id;
     
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
+    if (!mosqueId || mosqueId === 'undefined' || mosqueId === 'null') {
+        console.warn(`[Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
         return;
     }
 
@@ -241,6 +373,7 @@ const handlePaymentSucceeded = async (invoice) => {
         .from('mosques')
         .update({ 
             subscription_status: 'active',
+            trial_ends_at: null, // Remove trial restriction
             updated_at: new Date().toISOString()
         })
         .eq('id', mosqueId);
@@ -263,8 +396,8 @@ const handlePaymentFailed = async (invoice) => {
     const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
     const mosqueId = subscription.metadata.app_mosque_id;
     
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
+    if (!mosqueId || mosqueId === 'undefined' || mosqueId === 'null') {
+        console.warn(`[Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
         return;
     }
 
@@ -281,8 +414,8 @@ const handlePaymentFailed = async (invoice) => {
 const handleSubscriptionDeleted = async (subscription) => {
     const mosqueId = subscription.metadata.app_mosque_id;
     
-    if (!mosqueId) {
-        console.warn(`[Stripe Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
+    if (!mosqueId || mosqueId === 'undefined' || mosqueId === 'null') {
+        console.warn(`[Webhook] No mosque ID in subscription metadata for ${subscription.id}`);
         return;
     }
 
@@ -290,6 +423,7 @@ const handleSubscriptionDeleted = async (subscription) => {
         .from('mosques')
         .update({ 
             subscription_status: 'canceled',
+            trial_ends_at: null,
             updated_at: new Date().toISOString()
         })
         .eq('id', mosqueId);
@@ -321,13 +455,14 @@ const logPaymentEvent = async (mosqueId, invoice, eventType) => {
     }
 };
 
-// Email notification functions
-const sendWelcomeEmail = async (mosqueId, subscription) => {
+// === EMAIL NOTIFICATION FUNCTIONS ===
+
+const sendWelcomeEmail = async (mosqueId, subscriptionId) => {
     try {
         // Haal moskee gegevens op
         const { data: mosque, error } = await supabase
             .from('mosques')
-            .select('name, admin_email')
+            .select('name, admin_email, subdomain')
             .eq('id', mosqueId)
             .single();
         
@@ -338,21 +473,56 @@ const sendWelcomeEmail = async (mosqueId, subscription) => {
 
         const emailContent = {
             to: mosque.admin_email,
-            subject: 'Welkom bij MijnLVS Professional! 🎉',
+            subject: '🎉 Welkom bij MijnLVS Professional!',
             html: `
-                <h2>Welkom bij MijnLVS Professional!</h2>
-                <p>Beste ${mosque.name},</p>
-                <p>Hartelijk dank voor uw vertrouwen in MijnLVS! Uw Professional abonnement is succesvol geactiveerd.</p>
-                <h3>Wat kunt u nu doen:</h3>
-                <ul>
-                    <li>Onbeperkt aantal leerlingen toevoegen</li>
-                    <li>Financieel beheer gebruiken</li>
-                    <li>Qor'aan voortgang bijhouden</li>
-                    <li>Rapporten genereren</li>
-                    <li>E-mail communicatie met ouders</li>
-                </ul>
-                <p>Heeft u vragen? Neem gerust contact met ons op via i.abdellaoui@gmail.com</p>
-                <p>Barakallahu feeki,<br>Het MijnLVS Team</p>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #10b981;">Welkom bij MijnLVS Professional!</h2>
+                    <p>Beste ${mosque.name},</p>
+                    
+                    <p>🎉 <strong>Uw betaling is succesvol verwerkt en uw Professional account is direct actief!</strong></p>
+                    
+                    <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <h3 style="color: #15803d; margin-top: 0;">Wat kunt u nu doen:</h3>
+                        <ul style="color: #166534;">
+                            <li>✅ Onbeperkt aantal leerlingen toevoegen</li>
+                            <li>💰 Volledige financieel beheer gebruiken</li>
+                            <li>📖 Qor'aan voortgang bijhouden</li>
+                            <li>📊 Gedetailleerde rapporten genereren</li>
+                            <li>📧 Professionele e-mail communicatie met ouders</li>
+                            <li>📱 Toegang tot mobiele app voor ouders</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://${mosque.subdomain}.mijnlvs.nl/login" 
+                           style="background: #10b981; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+                            Start Nu met MijnLVS Professional
+                        </a>
+                    </div>
+                    
+                    <div style="background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <h3 style="color: #92400e; margin-top: 0;">📋 Volgende Stappen:</h3>
+                        <p style="color: #78350f; margin-bottom: 0;">
+                            1. Log in op uw dashboard<br>
+                            2. Voeg uw eerste leerlingen toe<br>
+                            3. Stel uw financiële instellingen in<br>
+                            4. Nodig ouders uit voor de app
+                        </p>
+                    </div>
+                    
+                    <p>Heeft u vragen of hulp nodig bij het instellen? Neem gerust contact met ons op via <a href="mailto:i.abdellaoui@gmail.com">i.abdellaoui@gmail.com</a></p>
+                    
+                    <p style="margin-top: 30px;">
+                        Barakallahu feeki,<br>
+                        <strong>Het MijnLVS Team</strong>
+                    </p>
+                    
+                    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
+                    <p style="font-size: 12px; color: #6b7280;">
+                        Dit is een geautomatiseerde bevestiging van uw MijnLVS Professional abonnement.
+                        Abonnement ID: ${subscriptionId}
+                    </p>
+                </div>
             `
         };
 
@@ -376,14 +546,33 @@ const sendTrialEndingEmail = async (mosqueId, subscription) => {
 
         const emailContent = {
             to: mosque.admin_email,
-            subject: 'Uw MijnLVS proefperiode eindigt binnenkort ⏰',
+            subject: '⏰ Uw MijnLVS proefperiode eindigt binnenkort',
             html: `
-                <h2>Uw proefperiode eindigt over 3 dagen</h2>
-                <p>Beste ${mosque.name},</p>
-                <p>Uw 14-daagse proefperiode van MijnLVS eindigt over 3 dagen op ${new Date(subscription.trial_end * 1000).toLocaleDateString('nl-NL')}.</p>
-                <p>Om ononderbroken toegang te behouden tot alle Professional functies, hoeft u niets te doen - de betaling wordt automatisch verwerkt.</p>
-                <p>Vragen? Neem contact met ons op via i.abdellaoui@gmail.com</p>
-                <p>Barakallahu feeki,<br>Het MijnLVS Team</p>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #f59e0b;">Uw proefperiode eindigt over 3 dagen</h2>
+                    <p>Beste ${mosque.name},</p>
+                    
+                    <div style="background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <p style="color: #92400e; margin: 0;">
+                            <strong>Uw 14-daagse proefperiode van MijnLVS eindigt over 3 dagen op ${new Date(subscription.trial_end * 1000).toLocaleDateString('nl-NL')}.</strong>
+                        </p>
+                    </div>
+                    
+                    <p>Om ononderbroken toegang te behouden tot alle Professional functies, hoeft u niets te doen - de betaling wordt automatisch verwerkt.</p>
+                    
+                    <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <h3 style="color: #15803d; margin-top: 0;">Na de proefperiode:</h3>
+                        <ul style="color: #166534;">
+                            <li>Automatische factuur van €${subscription.items.data[0]?.price?.unit_amount ? (subscription.items.data[0].price.unit_amount / 100) : '29'} per maand</li>
+                            <li>Ononderbroken toegang tot alle functies</li>
+                            <li>Geen beperking op aantal leerlingen</li>
+                        </ul>
+                    </div>
+                    
+                    <p>Vragen over uw abonnement? Neem contact met ons op via <a href="mailto:i.abdellaoui@gmail.com">i.abdellaoui@gmail.com</a></p>
+                    
+                    <p>Barakallahu feeki,<br><strong>Het MijnLVS Team</strong></p>
+                </div>
             `
         };
 
@@ -409,15 +598,32 @@ const sendPaymentConfirmationEmail = async (mosqueId, invoice) => {
         
         const emailContent = {
             to: mosque.admin_email,
-            subject: 'Betalingsbevestiging MijnLVS ✅',
+            subject: '✅ Betalingsbevestiging MijnLVS Professional',
             html: `
-                <h2>Betaling Ontvangen</h2>
-                <p>Beste ${mosque.name},</p>
-                <p>Wij hebben uw betaling van €${amount} succesvol ontvangen.</p>
-                <p>Uw MijnLVS Professional abonnement blijft actief.</p>
-                <p>Factuur nummer: ${invoice.number}</p>
-                <p>Dank voor uw vertrouwen in MijnLVS!</p>
-                <p>Barakallahu feeki,<br>Het MijnLVS Team</p>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #10b981;">Betaling Succesvol Ontvangen</h2>
+                    <p>Beste ${mosque.name},</p>
+                    
+                    <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <p style="color: #15803d; margin: 0;">
+                            ✅ <strong>Wij hebben uw betaling van €${amount} succesvol ontvangen.</strong>
+                        </p>
+                    </div>
+                    
+                    <p>Uw MijnLVS Professional abonnement blijft actief en alle functies zijn beschikbaar.</p>
+                    
+                    <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <h3 style="margin-top: 0;">Betalingsdetails:</h3>
+                        <p style="margin: 5px 0;"><strong>Bedrag:</strong> €${amount}</p>
+                        <p style="margin: 5px 0;"><strong>Factuur:</strong> ${invoice.number}</p>
+                        <p style="margin: 5px 0;"><strong>Datum:</strong> ${new Date(invoice.created * 1000).toLocaleDateString('nl-NL')}</p>
+                        <p style="margin: 5px 0;"><strong>Volgende betaling:</strong> ${new Date(invoice.period_end * 1000).toLocaleDateString('nl-NL')}</p>
+                    </div>
+                    
+                    <p>Dank voor uw vertrouwen in MijnLVS!</p>
+                    
+                    <p>Barakallahu feeki,<br><strong>Het MijnLVS Team</strong></p>
+                </div>
             `
         };
 
@@ -433,7 +639,7 @@ const sendPaymentFailedEmail = async (mosqueId, invoice) => {
     try {
         const { data: mosque, error } = await supabase
             .from('mosques')
-            .select('name, admin_email')
+            .select('name, admin_email, subdomain')
             .eq('id', mosqueId)
             .single();
         
@@ -443,15 +649,41 @@ const sendPaymentFailedEmail = async (mosqueId, invoice) => {
         
         const emailContent = {
             to: mosque.admin_email,
-            subject: 'Betaling Mislukt - Actie Vereist ⚠️',
+            subject: '⚠️ Betaling Mislukt - Actie Vereist',
             html: `
-                <h2>Betaling Mislukt</h2>
-                <p>Beste ${mosque.name},</p>
-                <p>Helaas is de betaling van €${amount} voor uw MijnLVS abonnement mislukt.</p>
-                <p>Om service onderbreking te voorkomen, update uw betaalgegevens in uw account.</p>
-                <p><a href="${process.env.FRONTEND_URL}/dashboard" style="background: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Betaalgegevens Bijwerken</a></p>
-                <p>Vragen? Neem contact met ons op via i.abdellaoui@gmail.com</p>
-                <p>Het MijnLVS Team</p>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #dc2626;">Betaling Mislukt</h2>
+                    <p>Beste ${mosque.name},</p>
+                    
+                    <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <p style="color: #dc2626; margin: 0;">
+                            ⚠️ <strong>Helaas is de betaling van €${amount} voor uw MijnLVS abonnement mislukt.</strong>
+                        </p>
+                    </div>
+                    
+                    <p>Om service onderbreking te voorkomen, is het belangrijk dat u uw betaalgegevens bijwerkt.</p>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://${mosque.subdomain}.mijnlvs.nl/dashboard" 
+                           style="background: #dc2626; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+                            Betaalgegevens Bijwerken
+                        </a>
+                    </div>
+                    
+                    <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <h3 style="margin-top: 0;">Wat kunt u doen:</h3>
+                        <ul>
+                            <li>Controleer of uw creditcard nog geldig is</li>
+                            <li>Zorg voor voldoende saldo op uw rekening</li>
+                            <li>Update uw betaalgegevens in het dashboard</li>
+                            <li>Neem contact op als het probleem aanhoudt</li>
+                        </ul>
+                    </div>
+                    
+                    <p>Vragen? Neem contact met ons op via <a href="mailto:i.abdellaoui@gmail.com">i.abdellaoui@gmail.com</a></p>
+                    
+                    <p><strong>Het MijnLVS Team</strong></p>
+                </div>
             `
         };
 
@@ -467,7 +699,7 @@ const sendCancellationEmail = async (mosqueId, subscription) => {
     try {
         const { data: mosque, error } = await supabase
             .from('mosques')
-            .select('name, admin_email')
+            .select('name, admin_email, subdomain')
             .eq('id', mosqueId)
             .single();
         
@@ -477,13 +709,35 @@ const sendCancellationEmail = async (mosqueId, subscription) => {
             to: mosque.admin_email,
             subject: 'Abonnement Geannuleerd - Bedankt voor uw vertrouwen',
             html: `
-                <h2>Abonnement Geannuleerd</h2>
-                <p>Beste ${mosque.name},</p>
-                <p>Uw MijnLVS Professional abonnement is geannuleerd.</p>
-                <p>U kunt nog steeds de basis functies gebruiken met maximaal 10 leerlingen.</p>
-                <p>Wilt u in de toekomst weer upgraden? Dat kan altijd via uw dashboard.</p>
-                <p>Bedankt voor het vertrouwen dat u ons hebt gegeven.</p>
-                <p>Barakallahu feeki,<br>Het MijnLVS Team</p>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #6b7280;">Abonnement Geannuleerd</h2>
+                    <p>Beste ${mosque.name},</p>
+                    
+                    <p>Uw MijnLVS Professional abonnement is geannuleerd zoals u heeft aangevraagd.</p>
+                    
+                    <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                        <h3 style="color: #0369a1; margin-top: 0;">Wat betekent dit:</h3>
+                        <ul style="color: #075985;">
+                            <li>U kunt nog steeds de basis functies gebruiken</li>
+                            <li>Maximaal 10 leerlingen blijven toegestaan</li>
+                            <li>Uw gegevens blijven veilig bewaard</li>
+                            <li>U kunt altijd weer upgraden</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://${mosque.subdomain}.mijnlvs.nl/dashboard" 
+                           style="background: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">
+                            Ga naar Dashboard
+                        </a>
+                    </div>
+                    
+                    <p>Wilt u in de toekomst weer upgraden naar Professional? Dat kan altijd via uw dashboard.</p>
+                    
+                    <p>Bedankt voor het vertrouwen dat u ons hebt gegeven. We hopen u in de toekomst weer te mogen bedienen.</p>
+                    
+                    <p>Barakallahu feeki,<br><strong>Het MijnLVS Team</strong></p>
+                </div>
             `
         };
 
@@ -495,12 +749,54 @@ const sendCancellationEmail = async (mosqueId, subscription) => {
     }
 };
 
+// === CLEANUP FUNCTIONS ===
+
+// Cleanup expired pending payments
+const cleanupExpiredPayments = async () => {
+    try {
+        const { data, error } = await supabase
+            .from('pending_payments')
+            .update({ status: 'expired' })
+            .eq('status', 'pending')
+            .lt('expires_at', new Date().toISOString())
+            .select('count');
+
+        if (!error && data) {
+            console.log(`[Cleanup] Marked ${data.length} payments as expired`);
+        }
+    } catch (error) {
+        console.error('[Cleanup] Error cleaning up expired payments:', error);
+    }
+};
+
+// Cleanup old webhook events
+const cleanupOldWebhookEvents = async () => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        
+        const { data, error } = await supabase
+            .from('webhook_events_buffer')
+            .delete()
+            .lt('created_at', thirtyDaysAgo)
+            .select('count');
+
+        if (!error && data) {
+            console.log(`[Cleanup] Deleted ${data.length} old webhook events`);
+        }
+    } catch (error) {
+        console.error('[Cleanup] Error cleaning up old webhook events:', error);
+    }
+};
+
 module.exports = { 
     handleStripeWebhook,
+    linkPaymentToMosque,
     logPaymentEvent,
     sendWelcomeEmail,
     sendTrialEndingEmail,
     sendPaymentConfirmationEmail,
     sendPaymentFailedEmail,
-    sendCancellationEmail
+    sendCancellationEmail,
+    cleanupExpiredPayments,
+    cleanupOldWebhookEvents
 };
