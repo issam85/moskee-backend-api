@@ -106,8 +106,8 @@ router.post('/mosques/register', async (req, res) => {
         const { data, error } = await supabase.from('mosques').insert([{
             name: mosqueName, 
             subdomain: normalizedSubdomain, 
-            admin_email: normalizedAdminEmail, // ✅ Bewaar admin email
-            ...req.body
+            // admin_email verwijderd - wordt opgeslagen in users tabel
+            created_at: new Date().toISOString()
         }]).select().single();
         if (error) throw error;
         newMosque = data;
