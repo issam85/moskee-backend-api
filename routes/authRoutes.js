@@ -331,58 +331,114 @@ const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => 
   try {
     console.log(`[Payment Linking] Searching for pending payments for ${adminEmail}`);
     
-    // Zoek naar pending payments voor dit email (laatste 30 minuten)
-    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    // Zoek naar pending payments in laatste 60 minuten (verhoogd van 30)
+    const sixtyMinutesAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     
-    const { data: pendingPayments, error } = await supabase
-      .from('pending_payments')
-      .select('*')
-      .eq('customer_email', adminEmail)
-      .eq('status', 'pending')
-      .gte('created_at', thirtyMinutesAgo)
-      .order('created_at', { ascending: false });
+    let pendingPayment = null;
     
-    if (error) throw error;
+    // ✅ STRATEGIE 1: Match op customer_email (als aanwezig)
+    try {
+      const { data: emailMatches, error: emailError } = await supabase
+        .from('pending_payments')
+        .select('*')
+        .eq('customer_email', adminEmail)
+        .eq('status', 'pending')
+        .gte('created_at', sixtyMinutesAgo)
+        .order('created_at', { ascending: false });
+      
+      if (!emailError && emailMatches && emailMatches.length > 0) {
+        pendingPayment = emailMatches[0];
+        console.log(`[Payment Linking] ✅ Found payment by EMAIL: ${pendingPayment.tracking_id}`);
+      }
+    } catch (error) {
+      console.warn('[Payment Linking] Email strategy failed:', error.message);
+    }
     
-    if (!pendingPayments || pendingPayments.length === 0) {
-      console.log(`[Payment Linking] No pending payments found for ${adminEmail}`);
+    // ✅ STRATEGIE 2: Fallback - Match op timing (recent pending payments zonder email)
+    if (!pendingPayment) {
+      try {
+        console.log(`[Payment Linking] No email match found, trying timing-based matching...`);
+        
+        const { data: recentPayments, error: recentError } = await supabase
+          .from('pending_payments')
+          .select('*')
+          .eq('status', 'pending')
+          .is('mosque_id', null) // Nog niet gekoppeld
+          .gte('created_at', sixtyMinutesAgo)
+          .order('created_at', { ascending: false });
+        
+        if (!recentError && recentPayments && recentPayments.length > 0) {
+          // Neem de meest recente als er maar 1 is, of de eerste in de lijst
+          if (recentPayments.length === 1) {
+            pendingPayment = recentPayments[0];
+            console.log(`[Payment Linking] ✅ Found payment by TIMING (single recent): ${pendingPayment.tracking_id}`);
+          } else {
+            // Als er meerdere zijn, neem de eerste (meest recente)
+            pendingPayment = recentPayments[0];
+            console.log(`[Payment Linking] ⚠️ Found payment by TIMING (multiple, taking most recent): ${pendingPayment.tracking_id}`);
+          }
+        }
+      } catch (error) {
+        console.warn('[Payment Linking] Timing strategy failed:', error.message);
+      }
+    }
+    
+    // ✅ STRATEGIE 3: Extra fallback - Match op URL parameters (als tracking_id beschikbaar)
+    if (!pendingPayment) {
+      // Deze strategie kan later uitgebreid worden met URL parameter tracking
+      console.log(`[Payment Linking] No timing match found either`);
+    }
+    
+    // ❌ Geen payment gevonden
+    if (!pendingPayment) {
+      console.log(`[Payment Linking] No pending payments found for ${adminEmail} using any strategy`);
       return { success: false, reason: 'no_pending_payments' };
     }
     
-    // Neem de meest recente payment
-    const payment = pendingPayments[0];
-    console.log(`[Payment Linking] Found pending payment: ${payment.tracking_id} (${payment.stripe_subscription_id})`);
+    // ✅ Payment gevonden - nu koppelen
+    console.log(`[Payment Linking] Found pending payment: ${pendingPayment.tracking_id} (${pendingPayment.stripe_subscription_id})`);
+    console.log(`[Payment Linking] Payment details: customer_email="${pendingPayment.customer_email || 'EMPTY'}", amount=${pendingPayment.amount}`);
     
     // Update pending payment met mosque_id
-    await supabase
+    const { error: updateError } = await supabase
       .from('pending_payments')
       .update({ 
         mosque_id: mosqueId,
         status: 'linked',
+        customer_email: pendingPayment.customer_email || adminEmail, // ✅ Fix empty email
         updated_at: new Date().toISOString()
       })
-      .eq('id', payment.id);
+      .eq('id', pendingPayment.id);
+    
+    if (updateError) {
+      throw new Error(`Failed to update pending payment: ${updateError.message}`);
+    }
     
     // Update mosque met Stripe info
-    await supabase
+    const { error: mosqueUpdateError } = await supabase
       .from('mosques')
       .update({
-        stripe_customer_id: payment.stripe_customer_id,
-        stripe_subscription_id: payment.stripe_subscription_id,
+        stripe_customer_id: pendingPayment.stripe_customer_id,
+        stripe_subscription_id: pendingPayment.stripe_subscription_id,
         subscription_status: 'active', // ✅ ACTIVATE DIRECT!
         trial_ends_at: null, // Remove trial restriction
         updated_at: new Date().toISOString()
       })
       .eq('id', mosqueId);
     
+    if (mosqueUpdateError) {
+      throw new Error(`Failed to update mosque: ${mosqueUpdateError.message}`);
+    }
+    
     console.log(`✅ [Payment Linking] Successfully linked payment to mosque ${mosqueId} - Status now ACTIVE`);
     
     return { 
       success: true, 
-      paymentId: payment.id,
-      subscriptionId: payment.stripe_subscription_id,
-      stripeCustomerId: payment.stripe_customer_id,
-      amount: payment.amount
+      paymentId: pendingPayment.id,
+      subscriptionId: pendingPayment.stripe_subscription_id,
+      stripeCustomerId: pendingPayment.stripe_customer_id,
+      amount: pendingPayment.amount,
+      strategy: pendingPayment.customer_email ? 'email_match' : 'timing_match'
     };
     
   } catch (error) {
