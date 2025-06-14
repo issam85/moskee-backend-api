@@ -1,4 +1,4 @@
-// routes/authRoutes.js - VERBETERDE VERSIE MET WELKOMSTMAIL
+// routes/authRoutes.js - COMPLETE VERSIE MET PAYMENT LINKING
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
@@ -114,6 +114,9 @@ router.post('/mosques/register', async (req, res) => {
             zipcode: zipcode || null,
             phone: phone || null,
             website: website || null,
+            // ✅ Default subscription settings voor nieuwe registraties
+            subscription_status: 'trialing', // Start met trial
+            trial_ends_at: null, // Wordt ingesteld door payment systeem
             created_at: new Date().toISOString()
         };
 
@@ -171,31 +174,65 @@ router.post('/mosques/register', async (req, res) => {
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
         // =====================================================================
+        // ✅ NIEUWE FUNCTIONALITEIT: PAYMENT LINKING NA REGISTRATIE
+        // =====================================================================
+        let paymentLinked = false;
+        try {
+          console.log(`🔗 [Registration] Attempting payment linking for mosque ${newMosque.id}...`);
+          
+          const linkingResult = await linkPendingPaymentAfterRegistration({
+            mosqueId: newMosque.id,
+            adminEmail: normalizedAdminEmail
+          });
+          
+          if (linkingResult.success) {
+            console.log(`✅ [Registration] Payment linked successfully! Subscription: ${linkingResult.subscriptionId}`);
+            paymentLinked = true;
+            
+            // Update newMosque object met nieuwe status voor response
+            newMosque.subscription_status = 'active';
+            newMosque.stripe_customer_id = linkingResult.stripeCustomerId;
+            newMosque.stripe_subscription_id = linkingResult.subscriptionId;
+          } else {
+            console.log(`ℹ️ [Registration] No pending payment found - normal for free registrations`);
+          }
+        } catch (linkingError) {
+          console.error('[Registration] Payment linking failed (non-fatal):', linkingError);
+          // Continue met registratie - payment linking is niet kritiek
+        }
+        
+        // =====================================================================
         // ✅ NIEUWE FUNCTIONALITEIT: VERSTUUR WELKOMSTMAIL
         // =====================================================================
         try {
           console.log(`📧 [Registration] Sending welcome email to ${normalizedAdminEmail}...`);
           
-          // Bereid moskee data voor welkomstmail
+          // ✅ GECORRIGEERD: Gebruik juiste data structuur
           const welcomeEmailData = {
-            id: newMosque.id,
-            name: newMosque.name,
-            subdomain: newMosque.subdomain,
-            admin_name: adminName,
-            admin_email: normalizedAdminEmail,
-            email: newMosque.email,
-            address: newMosque.address,
-            city: newMosque.city,
-            zipcode: newMosque.zipcode,
-            phone: newMosque.phone,
-            website: newMosque.website
+            mosque: {
+              id: newMosque.id,
+              name: newMosque.name,
+              subdomain: newMosque.subdomain,
+              email: newMosque.email, // Contact email van moskee
+              address: newMosque.address,
+              city: newMosque.city,
+              zipcode: newMosque.zipcode,
+              phone: newMosque.phone,
+              website: newMosque.website
+            },
+            admin: {
+              id: newAppAdmin.id,
+              name: adminName,
+              email: normalizedAdminEmail, // ✅ Admin user email
+              role: 'admin'
+            }
           };
 
           // Verstuur welkomstmail
           const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
           
           if (emailResult.success) {
-            console.log(`✅ [Registration] Welcome email sent successfully to ${normalizedAdminEmail}`);
+            console.log(`✅ [Registration] Welcome email sent successfully to ${normalizedAdminEmail} via ${emailResult.service}`);
           } else {
             console.warn(`⚠️ [Registration] Welcome email failed for ${normalizedAdminEmail}:`, emailResult.error);
             // Continue ook al faalt de email - registratie is geslaagd
@@ -208,13 +245,23 @@ router.post('/mosques/register', async (req, res) => {
         // EINDE WELKOMSTMAIL FUNCTIONALITEIT
         // =====================================================================
         
+        // Bepaal success message gebaseerd op payment status
+        let successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw account is succesvol aangemaakt.`;
+        if (paymentLinked) {
+          successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw Professional account is direct actief en de welkomstmail is verstuurd.`;
+        } else {
+          successMessage += ' Een welkomstmail is verstuurd naar uw emailadres.';
+        }
+        
         // Alles is gelukt, stuur succesrespons
         res.status(201).json({ 
           success: true, 
-          message: 'Registratie succesvol! Een welkomstmail is verstuurd naar uw emailadres.', 
+          message: successMessage, 
           mosque: newMosque, 
           admin: newAppAdmin,
-          welcome_email_sent: true // Geef aan dat welkomstmail is verstuurd
+          welcome_email_sent: true, // Geef aan dat welkomstmail is verstuurd
+          payment_linked: paymentLinked, // Geef aan of betaling gekoppeld is
+          subscription_status: newMosque.subscription_status // Huidige status
         });
 
     } catch (error) {
@@ -277,6 +324,73 @@ router.post('/mosques/register', async (req, res) => {
   }
 });
 
+// =====================================================================
+// ✅ PAYMENT LINKING FUNCTIE (embedded in deze file)
+// =====================================================================
+const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => {
+  try {
+    console.log(`[Payment Linking] Searching for pending payments for ${adminEmail}`);
+    
+    // Zoek naar pending payments voor dit email (laatste 30 minuten)
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    
+    const { data: pendingPayments, error } = await supabase
+      .from('pending_payments')
+      .select('*')
+      .eq('customer_email', adminEmail)
+      .eq('status', 'pending')
+      .gte('created_at', thirtyMinutesAgo)
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    if (!pendingPayments || pendingPayments.length === 0) {
+      console.log(`[Payment Linking] No pending payments found for ${adminEmail}`);
+      return { success: false, reason: 'no_pending_payments' };
+    }
+    
+    // Neem de meest recente payment
+    const payment = pendingPayments[0];
+    console.log(`[Payment Linking] Found pending payment: ${payment.tracking_id} (${payment.stripe_subscription_id})`);
+    
+    // Update pending payment met mosque_id
+    await supabase
+      .from('pending_payments')
+      .update({ 
+        mosque_id: mosqueId,
+        status: 'linked',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', payment.id);
+    
+    // Update mosque met Stripe info
+    await supabase
+      .from('mosques')
+      .update({
+        stripe_customer_id: payment.stripe_customer_id,
+        stripe_subscription_id: payment.stripe_subscription_id,
+        subscription_status: 'active', // ✅ ACTIVATE DIRECT!
+        trial_ends_at: null, // Remove trial restriction
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', mosqueId);
+    
+    console.log(`✅ [Payment Linking] Successfully linked payment to mosque ${mosqueId} - Status now ACTIVE`);
+    
+    return { 
+      success: true, 
+      paymentId: payment.id,
+      subscriptionId: payment.stripe_subscription_id,
+      stripeCustomerId: payment.stripe_customer_id,
+      amount: payment.amount
+    };
+    
+  } catch (error) {
+    console.error('[Payment Linking] Error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
 // ✅ NIEUWE UTILITY ROUTE: Check if email exists
 router.post('/mosques/check-email', async (req, res) => {
   try {
@@ -315,37 +429,54 @@ router.post('/mosques/check-email', async (req, res) => {
 // ✅ NIEUWE ROUTE: Test welkomstmail functionaliteit
 router.post('/mosques/test-welcome-email', async (req, res) => {
   try {
-    const { mosqueId, adminEmail } = req.body;
+    const { mosqueId, testEmail } = req.body;
     
-    if (!mosqueId || !adminEmail) {
-      return sendError(res, 400, 'Moskee ID en admin email zijn verplicht.', null, req);
+    if (!mosqueId) {
+      return sendError(res, 400, 'Moskee ID is verplicht.', null, req);
     }
 
     // Haal moskee gegevens op
     const { data: mosque, error: mosqueError } = await supabase
       .from('mosques')
-      .select('*, users!inner(*)')
+      .select('*')
       .eq('id', mosqueId)
-      .eq('users.role', 'admin')
       .single();
 
     if (mosqueError || !mosque) {
       return sendError(res, 404, 'Moskee niet gevonden.', null, req);
     }
 
-    const admin = mosque.users[0];
+    // Haal admin gebruiker op
+    const { data: admin, error: adminError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('mosque_id', mosqueId)
+      .eq('role', 'admin')
+      .single();
+
+    if (adminError || !admin) {
+      return sendError(res, 404, 'Admin gebruiker niet gevonden.', null, req);
+    }
+
+    // ✅ GECORRIGEERDE data structuur
     const welcomeEmailData = {
-      id: mosque.id,
-      name: mosque.name,
-      subdomain: mosque.subdomain,
-      admin_name: admin.name,
-      admin_email: admin.email,
-      email: mosque.email,
-      address: mosque.address,
-      city: mosque.city,
-      zipcode: mosque.zipcode,
-      phone: mosque.phone,
-      website: mosque.website
+      mosque: {
+        id: mosque.id,
+        name: mosque.name,
+        subdomain: mosque.subdomain,
+        email: mosque.email,
+        address: mosque.address,
+        city: mosque.city,
+        zipcode: mosque.zipcode,
+        phone: mosque.phone,
+        website: mosque.website
+      },
+      admin: {
+        id: admin.id,
+        name: admin.name,
+        email: testEmail || admin.email, // ✅ Override voor test
+        role: admin.role
+      }
     };
 
     // Test welkomstmail
@@ -354,12 +485,15 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
     if (emailResult.success) {
       res.json({ 
         success: true, 
-        message: `Test welkomstmail verstuurd naar ${admin.email}` 
+        message: `Test welkomstmail verstuurd naar ${welcomeEmailData.admin.email} via ${emailResult.service}`,
+        service: emailResult.service,
+        messageId: emailResult.messageId
       });
     } else {
       res.json({ 
         success: false, 
-        message: `Welkomstmail versturen mislukt: ${emailResult.error}` 
+        message: `Welkomstmail versturen mislukt: ${emailResult.error}`,
+        service: emailResult.service
       });
     }
 
@@ -400,6 +534,44 @@ router.post('/test-resend-email', async (req, res) => {
   } catch (error) {
     console.error('Error testing Resend email:', error);
     sendError(res, 500, 'Fout bij testen email service.', error.message, req);
+  }
+});
+
+// ✅ TEST ROUTE voor payment linking
+router.post('/test-payment-linking', async (req, res) => {
+  try {
+    const { mosqueId, adminEmail } = req.body;
+    
+    if (!mosqueId || !adminEmail) {
+      return sendError(res, 400, 'Moskee ID en admin email zijn verplicht.', null, req);
+    }
+
+    console.log(`🧪 [TEST] Testing payment linking for mosque: ${mosqueId}, email: ${adminEmail}`);
+    
+    const result = await linkPendingPaymentAfterRegistration({
+      mosqueId: mosqueId,
+      adminEmail: adminEmail
+    });
+    
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: `Payment linking succesvol voor mosque ${mosqueId}`,
+        paymentId: result.paymentId,
+        subscriptionId: result.subscriptionId,
+        amount: result.amount
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        message: `Payment linking mislukt: ${result.error || result.reason}`,
+        reason: result.reason
+      });
+    }
+
+  } catch (error) {
+    console.error('Error testing payment linking:', error);
+    sendError(res, 500, 'Fout bij testen payment linking.', error.message, req);
   }
 });
 
