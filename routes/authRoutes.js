@@ -1,8 +1,9 @@
-// routes/authRoutes.js - VERBETERDE VERSIE
+// routes/authRoutes.js - VERBETERDE VERSIE MET WELKOMSTMAIL
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
 const { sendM365EmailInternal } = require('../services/emailService');
+const { sendRegistrationWelcomeEmail } = require('../services/registrationEmailService');
 
 // POST /api/auth/login
 router.post('/auth/login', async (req, res) => {
@@ -42,7 +43,7 @@ router.post('/auth/login', async (req, res) => {
 // POST /api/mosques/register
 router.post('/mosques/register', async (req, res) => {
   try {
-    const { mosqueName, subdomain, adminName, adminEmail, adminPassword } = req.body;
+    const { mosqueName, subdomain, adminName, adminEmail, adminPassword, address, city, zipcode, phone, website, contactEmail } = req.body;
     
     // Validatie van input
     if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) {
@@ -103,12 +104,25 @@ router.post('/mosques/register', async (req, res) => {
 
     try {
         // Stap 2: Maak het moskee-record aan
-        const { data, error } = await supabase.from('mosques').insert([{
+        const mosqueData = {
             name: mosqueName, 
-            subdomain: normalizedSubdomain, 
-            // admin_email verwijderd - wordt opgeslagen in users tabel
+            subdomain: normalizedSubdomain,
+            // ✅ FIXED: Gebruik email in plaats van admin_email (zoals in paymentRoutes.js)
+            email: normalizedAdminEmail, // Contact email van de moskee (meestal admin email)
+            address: address || null,
+            city: city || null,
+            zipcode: zipcode || null,
+            phone: phone || null,
+            website: website || null,
             created_at: new Date().toISOString()
-        }]).select().single();
+        };
+
+        // Als er een apart contact email is opgegeven, gebruik dat
+        if (contactEmail && contactEmail.trim() && contactEmail.trim() !== normalizedAdminEmail) {
+            mosqueData.email = contactEmail.trim().toLowerCase();
+        }
+
+        const { data, error } = await supabase.from('mosques').insert([mosqueData]).select().single();
         if (error) throw error;
         newMosque = data;
 
@@ -156,12 +170,51 @@ router.post('/mosques/register', async (req, res) => {
 
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
+        // =====================================================================
+        // ✅ NIEUWE FUNCTIONALITEIT: VERSTUUR WELKOMSTMAIL
+        // =====================================================================
+        try {
+          console.log(`📧 [Registration] Sending welcome email to ${normalizedAdminEmail}...`);
+          
+          // Bereid moskee data voor welkomstmail
+          const welcomeEmailData = {
+            id: newMosque.id,
+            name: newMosque.name,
+            subdomain: newMosque.subdomain,
+            admin_name: adminName,
+            admin_email: normalizedAdminEmail,
+            email: newMosque.email,
+            address: newMosque.address,
+            city: newMosque.city,
+            zipcode: newMosque.zipcode,
+            phone: newMosque.phone,
+            website: newMosque.website
+          };
+
+          // Verstuur welkomstmail
+          const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
+          
+          if (emailResult.success) {
+            console.log(`✅ [Registration] Welcome email sent successfully to ${normalizedAdminEmail}`);
+          } else {
+            console.warn(`⚠️ [Registration] Welcome email failed for ${normalizedAdminEmail}:`, emailResult.error);
+            // Continue ook al faalt de email - registratie is geslaagd
+          }
+        } catch (emailError) {
+          console.error(`❌ [Registration] Error sending welcome email to ${normalizedAdminEmail}:`, emailError);
+          // Continue ook al faalt de email - registratie is geslaagd
+        }
+        // =====================================================================
+        // EINDE WELKOMSTMAIL FUNCTIONALITEIT
+        // =====================================================================
+        
         // Alles is gelukt, stuur succesrespons
         res.status(201).json({ 
           success: true, 
-          message: 'Registratie succesvol!', 
+          message: 'Registratie succesvol! Een welkomstmail is verstuurd naar uw emailadres.', 
           mosque: newMosque, 
-          admin: newAppAdmin 
+          admin: newAppAdmin,
+          welcome_email_sent: true // Geef aan dat welkomstmail is verstuurd
         });
 
     } catch (error) {
@@ -256,6 +309,63 @@ router.post('/mosques/check-email', async (req, res) => {
     }
   } catch (error) {
     sendError(res, 500, 'Fout bij controleren email.', error.message, req);
+  }
+});
+
+// ✅ NIEUWE ROUTE: Test welkomstmail functionaliteit
+router.post('/mosques/test-welcome-email', async (req, res) => {
+  try {
+    const { mosqueId, adminEmail } = req.body;
+    
+    if (!mosqueId || !adminEmail) {
+      return sendError(res, 400, 'Moskee ID en admin email zijn verplicht.', null, req);
+    }
+
+    // Haal moskee gegevens op
+    const { data: mosque, error: mosqueError } = await supabase
+      .from('mosques')
+      .select('*, users!inner(*)')
+      .eq('id', mosqueId)
+      .eq('users.role', 'admin')
+      .single();
+
+    if (mosqueError || !mosque) {
+      return sendError(res, 404, 'Moskee niet gevonden.', null, req);
+    }
+
+    const admin = mosque.users[0];
+    const welcomeEmailData = {
+      id: mosque.id,
+      name: mosque.name,
+      subdomain: mosque.subdomain,
+      admin_name: admin.name,
+      admin_email: admin.email,
+      email: mosque.email,
+      address: mosque.address,
+      city: mosque.city,
+      zipcode: mosque.zipcode,
+      phone: mosque.phone,
+      website: mosque.website
+    };
+
+    // Test welkomstmail
+    const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
+    
+    if (emailResult.success) {
+      res.json({ 
+        success: true, 
+        message: `Test welkomstmail verstuurd naar ${admin.email}` 
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        message: `Welkomstmail versturen mislukt: ${emailResult.error}` 
+      });
+    }
+
+  } catch (error) {
+    console.error('Error testing welcome email:', error);
+    sendError(res, 500, 'Fout bij testen welkomstmail.', error.message, req);
   }
 });
 

@@ -4,10 +4,13 @@ const { sendM365EmailInternal } = require('./emailService');
 // Verstuur welkomstmail voor nieuwe moskee registratie
 const sendRegistrationWelcomeEmail = async (mosqueData) => {
     try {
-        const emailContent = {
+        console.log(`📧 [Registration Email] Preparing welcome email for ${mosqueData.admin_email} (Mosque: ${mosqueData.name})`);
+
+        // ✅ GECORRIGEERD: Voeg mosqueId en emailType toe voor sendM365EmailInternal
+        const emailDetails = {
             to: mosqueData.admin_email,
             subject: '🕌 Welkom bij MijnLVS - Uw account is klaar!',
-            html: `
+            body: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
                     <div style="text-align: center; margin-bottom: 30px;">
                         <h1 style="color: #10b981; margin: 0;">Welkom bij MijnLVS!</h1>
@@ -118,16 +121,24 @@ const sendRegistrationWelcomeEmail = async (mosqueData) => {
                         </p>
                     </div>
                 </div>
-            `
+            `,
+            mosqueId: mosqueData.id, // ✅ TOEGEVOEGD: Mosque ID voor de emailService
+            emailType: 'registration_welcome' // ✅ TOEGEVOEGD: Email type voor logging
         };
 
-        await sendM365EmailInternal(emailContent);
-        console.log(`✅ [Registration Email] Welcome email sent to ${mosqueData.admin_email} for mosque: ${mosqueData.name}`);
+        // ✅ GECORRIGEERD: Gebruik de juiste parameter structuur
+        const emailResult = await sendM365EmailInternal(emailDetails);
         
-        return { success: true };
+        if (emailResult.success) {
+            console.log(`✅ [Registration Email] Welcome email sent successfully to ${mosqueData.admin_email} for mosque: ${mosqueData.name}`);
+            return { success: true, messageId: emailResult.messageId };
+        } else {
+            console.error(`❌ [Registration Email] Welcome email failed for ${mosqueData.admin_email}:`, emailResult.error);
+            return { success: false, error: emailResult.error };
+        }
         
     } catch (error) {
-        console.error('[Registration Email] Failed to send welcome email:', error);
+        console.error('❌ [Registration Email] Exception while sending welcome email:', error);
         return { success: false, error: error.message };
     }
 };
@@ -135,10 +146,12 @@ const sendRegistrationWelcomeEmail = async (mosqueData) => {
 // Verstuur reminder email na 24 uur als ze nog niet hebben ingelogd
 const sendGettingStartedReminder = async (mosqueData) => {
     try {
-        const emailContent = {
+        console.log(`📧 [Registration Email] Preparing reminder email for ${mosqueData.admin_email}`);
+
+        const emailDetails = {
             to: mosqueData.admin_email,
             subject: '🚀 Klaar om te beginnen met MijnLVS?',
-            html: `
+            body: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
                     <h2 style="color: #10b981;">Assalamu alaykum ${mosqueData.admin_name},</h2>
                     
@@ -173,21 +186,85 @@ const sendGettingStartedReminder = async (mosqueData) => {
                         Het MijnLVS Team
                     </p>
                 </div>
-            `
+            `,
+            mosqueId: mosqueData.id,
+            emailType: 'registration_reminder'
         };
 
-        await sendM365EmailInternal(emailContent);
-        console.log(`✅ [Registration Email] Reminder email sent to ${mosqueData.admin_email}`);
+        const emailResult = await sendM365EmailInternal(emailDetails);
         
-        return { success: true };
+        if (emailResult.success) {
+            console.log(`✅ [Registration Email] Reminder email sent successfully to ${mosqueData.admin_email}`);
+            return { success: true, messageId: emailResult.messageId };
+        } else {
+            console.error(`❌ [Registration Email] Reminder email failed for ${mosqueData.admin_email}:`, emailResult.error);
+            return { success: false, error: emailResult.error };
+        }
         
     } catch (error) {
-        console.error('[Registration Email] Failed to send reminder email:', error);
+        console.error('❌ [Registration Email] Exception while sending reminder email:', error);
+        return { success: false, error: error.message };
+    }
+};
+
+// ✅ NIEUWE FUNCTIE: Test welkomstmail (voor debugging)
+const testWelcomeEmail = async (mosqueId, forceEmail = null) => {
+    try {
+        console.log(`🧪 [Registration Email] Testing welcome email for mosque ${mosqueId}`);
+
+        // Haal moskee en admin gegevens op
+        const { supabase } = require('../config/database');
+        
+        const { data: mosque, error: mosqueError } = await supabase
+            .from('mosques')
+            .select('*')
+            .eq('id', mosqueId)
+            .single();
+
+        if (mosqueError || !mosque) {
+            throw new Error(`Mosque ${mosqueId} not found: ${mosqueError?.message || 'Unknown error'}`);
+        }
+
+        const { data: admin, error: adminError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('mosque_id', mosqueId)
+            .eq('role', 'admin')
+            .single();
+
+        if (adminError || !admin) {
+            throw new Error(`Admin for mosque ${mosqueId} not found: ${adminError?.message || 'Unknown error'}`);
+        }
+
+        // Bereid test email data voor
+        const testEmailData = {
+            id: mosque.id,
+            name: mosque.name,
+            subdomain: mosque.subdomain,
+            admin_name: admin.name,
+            admin_email: forceEmail || admin.email,
+            email: mosque.email,
+            address: mosque.address,
+            city: mosque.city,
+            zipcode: mosque.zipcode,
+            phone: mosque.phone,
+            website: mosque.website
+        };
+
+        // Verstuur test welkomstmail
+        const result = await sendRegistrationWelcomeEmail(testEmailData);
+        
+        console.log(`🧪 [Registration Email] Test result for ${testEmailData.admin_email}:`, result);
+        return result;
+        
+    } catch (error) {
+        console.error('❌ [Registration Email] Error in test welcome email:', error);
         return { success: false, error: error.message };
     }
 };
 
 module.exports = {
     sendRegistrationWelcomeEmail,
-    sendGettingStartedReminder
+    sendGettingStartedReminder,
+    testWelcomeEmail
 };
