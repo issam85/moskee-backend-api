@@ -1,4 +1,4 @@
-// routes/paymentRoutes.js - Volledig geautomatiseerde Stripe flow
+// routes/paymentRoutes.js - GECORRIGEERD: 'parents' → 'users'
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { stripe } = require('../config/stripe');
@@ -312,14 +312,14 @@ router.post('/stripe/retry-pending-links', async (req, res) => {
             // Zoek naar recent geregistreerde moskeeën met dit email
             const { data: mosques, error: mosqueError } = await supabase
                 .from('mosques')
-                .select('id, admin_email')
-                .eq('admin_email', retry.customer_email)
+                .select('id, email') // ✅ FIXED: was admin_email, nu email
+                .eq('email', retry.customer_email)
                 .gte('created_at', new Date(Date.now() - 86400000).toISOString()); // Laatste 24 uur
 
             if (!mosqueError && mosques && mosques.length > 0) {
                 // Probeer linking voor elke gevonden moskee
                 for (const mosque of mosques) {
-                    const linkResult = await tryLinkPayment(mosque.id, mosque.admin_email, retry.tracking_id);
+                    const linkResult = await tryLinkPayment(mosque.id, mosque.email, retry.tracking_id);
                     if (linkResult.success) {
                         processedCount++;
                         
@@ -535,6 +535,7 @@ router.get('/mosque/:mosqueId', async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('payments')
+            // ✅ FIXED: parent_id references users table with role filter
             .select('*, parent:parent_id(name, email), processed_by_user:processed_by(name)')
             .eq('mosque_id', req.params.mosqueId)
             .order('payment_date', { ascending: false });
@@ -564,11 +565,13 @@ router.post('/', async (req, res) => {
             return sendError(res, 403, "U kunt alleen betalingen registreren voor uw eigen moskee.", null, req);
         }
 
+        // ✅ FIXED: Check users table with role filter instead of non-existent parents table
         const { data: parent, error: parentError } = await supabase
-            .from('parents')
+            .from('users')  // ✅ CORRECT TABLE NAME
             .select('id, name')
             .eq('id', parent_id)
             .eq('mosque_id', mosque_id)
+            .eq('role', 'parent')  // ✅ FILTER ON ROLE
             .single();
             
         if (parentError || !parent) {
