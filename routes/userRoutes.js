@@ -65,7 +65,8 @@ router.post('/', async (req, res) => {
         const { data: { user: supabaseAuthUser }, error: authError } = await supabase.auth.admin.createUser({ 
             email: normalizedEmail, 
             password: tempPassword, 
-            email_confirm: true 
+            email_confirm: true,
+            user_metadata: { name: name, role: role }
         });
 
         if (authError) {

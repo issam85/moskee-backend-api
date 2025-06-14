@@ -117,7 +117,8 @@ router.post('/mosques/register', async (req, res) => {
         const { data: authData, error: authError } = await supabase.auth.admin.createUser({
             email: normalizedAdminEmail,
             password: adminPassword,
-            email_confirm: true // ✅ Auto-bevestig email
+            email_confirm: true, // ✅ Auto-bevestig email
+            user_metadata: { name: adminName, role: 'admin' }
         });
         
         if (authError) {
