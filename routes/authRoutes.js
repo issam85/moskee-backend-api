@@ -369,4 +369,38 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
   }
 });
 
+// ✅ TEST ROUTE voor Resend email service
+router.post('/test-resend-email', async (req, res) => {
+  try {
+    const { sendTestEmail } = require('../services/emailService');
+    const { testEmail } = req.body;
+    
+    if (!testEmail) {
+      return sendError(res, 400, 'Test email adres is verplicht.', null, req);
+    }
+
+    console.log(`🧪 [TEST] Testing Resend with email: ${testEmail}`);
+    const result = await sendTestEmail(testEmail);
+    
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: `Test email succesvol verstuurd naar ${testEmail}`,
+        messageId: result.messageId,
+        service: result.service
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        message: `Test email mislukt: ${result.error}`,
+        service: result.service
+      });
+    }
+
+  } catch (error) {
+    console.error('Error testing Resend email:', error);
+    sendError(res, 500, 'Fout bij testen email service.', error.message, req);
+  }
+});
+
 module.exports = router;
