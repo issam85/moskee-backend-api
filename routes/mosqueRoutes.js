@@ -77,18 +77,30 @@ router.put('/:mosqueId/m365-settings', async (req, res) => {
         const { m365_tenant_id, m365_client_id, m365_client_secret, m365_sender_email, m365_configured } = req.body;
         
         const updatePayload = {
-            m365_tenant_id, m365_client_id, m365_sender_email,
-            m365_configured: !!m365_configured, updated_at: new Date()
+            m365_tenant_id,
+            m365_client_id,
+            m365_sender_email,
+            m365_configured: !!m365_configured,
+            updated_at: new Date()
         };
-        // Update secret alleen als een nieuwe waarde wordt meegegeven
+        
         if (m365_client_secret && m365_client_secret.trim() !== '') {
             updatePayload.m365_client_secret = m365_client_secret;
         }
 
-        const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId).select().single();
+        const { data, error } = await supabase
+            .from('mosques')
+            .update(updatePayload)
+            .eq('id', mosqueId)
+            .select() // Selecteer alle kolommen na de update
+            .single();
+            
         if (error) throw error;
         
-        delete data.m365_client_secret; // Niet terugsturen naar frontend
+        // Verwijder de secret UITSLUITEND uit de respons die naar de frontend gaat.
+        // Hij is wel opgeslagen in de database.
+        delete data.m365_client_secret;
+
         res.json({ success: true, message: "M365 instellingen bijgewerkt.", data });
     } catch (error) {
         sendError(res, 500, "Fout bij bijwerken M365 instellingen.", error.message, req);
