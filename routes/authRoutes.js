@@ -1,4 +1,4 @@
-// routes/authRoutes.js
+// routes/authRoutes.js - VERBETERDE VERSIE
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
@@ -43,55 +43,218 @@ router.post('/auth/login', async (req, res) => {
 router.post('/mosques/register', async (req, res) => {
   try {
     const { mosqueName, subdomain, adminName, adminEmail, adminPassword } = req.body;
-    if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) return sendError(res, 400, 'Verplichte registratievelden ontbreken.', null, req);
-    if (adminPassword.length < 8) return sendError(res, 400, 'Wachtwoord moet minimaal 8 karakters lang zijn.', null, req);
     
+    // Validatie van input
+    if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) {
+      return sendError(res, 400, 'Verplichte registratievelden ontbreken.', null, req);
+    }
+    if (adminPassword.length < 8) {
+      return sendError(res, 400, 'Wachtwoord moet minimaal 8 karakters lang zijn.', null, req);
+    }
+
     const normalizedSubdomain = subdomain.toLowerCase().trim();
     const normalizedAdminEmail = adminEmail.toLowerCase().trim();
     
-    const { data: existingSubdomain } = await supabase.from('mosques').select('id').eq('subdomain', normalizedSubdomain).maybeSingle();
+    // Check 1: Bestaat het subdomein al in de 'mosques' tabel?
+    const { data: existingSubdomain, error: subdomainError } = await supabase
+      .from('mosques').select('id').eq('subdomain', normalizedSubdomain).maybeSingle();
+    if (subdomainError) throw subdomainError;
     if (existingSubdomain) return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
     
-    const { data: { users }, error: listUsersError } = await supabase.auth.admin.listUsers({ email: normalizedAdminEmail });
-    if (listUsersError) throw listUsersError;
-    if (users && users.length > 0) return sendError(res, 409, 'Dit emailadres is al geregistreerd.', null, req);
-
-    // Maak moskee record aan
-    const { data: newMosque, error: mosqueCreateError } = await supabase.from('mosques').insert([{
-      name: mosqueName,
-      subdomain: normalizedSubdomain,
-      ...req.body // Voeg overige optionele velden toe
-    }]).select().single();
-    if (mosqueCreateError) throw mosqueCreateError;
-    
-    // Maak auth user aan
-    const { data: { user: supabaseAuthAdmin }, error: authError } = await supabase.auth.admin.createUser({
-      email: normalizedAdminEmail,
-      password: adminPassword,
-      email_confirm: true // Account is direct actief
-    });
-    if (authError) {
-      await supabase.from('mosques').delete().eq('id', newMosque.id); // Rollback
-      return sendError(res, 500, `Fout bij aanmaken gebruiker: ${authError.message}`, authError, req);
+    // =====================================================================
+    // ✅ VERBETERDE SPOOKGEBRUIKER CHECK
+    // We gebruiken nu de admin API om te controleren of de gebruiker bestaat
+    // =====================================================================
+    try {
+      console.log(`Checking if user exists with email: ${normalizedAdminEmail}`);
+      
+      // Probeer de gebruiker op te halen via admin API
+      const { data: existingUsers, error: userListError } = await supabase.auth.admin.listUsers();
+      
+      if (userListError) {
+        console.error("Error checking existing users:", userListError);
+        // Als we users niet kunnen ophalen, proberen we gewoon de registratie
+        // en laten we Supabase zelf de duplicate check doen
+      } else {
+        // Filter op actieve gebruikers met dit emailadres
+        const existingActiveUser = existingUsers.users.find(user => 
+          user.email === normalizedAdminEmail && 
+          !user.deleted_at && // Geen soft-delete
+          user.email_confirmed_at // Email is bevestigd
+        );
+        
+        if (existingActiveUser) {
+          console.log(`Active user found with email ${normalizedAdminEmail}, blocking registration`);
+          return sendError(res, 409, 'Dit emailadres is al geregistreerd door een actieve gebruiker.', null, req);
+        }
+        
+        console.log(`No active user found with email ${normalizedAdminEmail}, proceeding with registration`);
+      }
+    } catch (adminError) {
+      console.warn("Admin API check failed, proceeding with registration attempt:", adminError.message);
+      // Als admin check faalt, proberen we gewoon de registratie
+      // Supabase zelf zal dan de duplicate check doen
     }
+    // =====================================================================
+    // EINDE VERBETERDE CHECK
+    // =====================================================================
     
-    // Maak app user record aan
-    const { data: newAppAdmin, error: appAdminError } = await supabase.from('users').insert([{
-      id: supabaseAuthAdmin.id,
-      mosque_id: newMosque.id,
-      email: normalizedAdminEmail,
-      name: adminName,
-      role: 'admin'
-    }]).select('id, email, name, role').single();
-    if (appAdminError) {
-      await supabase.from('mosques').delete().eq('id', newMosque.id); // Rollback
-      await supabase.auth.admin.deleteUser(supabaseAuthAdmin.id); // Rollback
-      throw appAdminError;
-    }
+    let newMosque, supabaseAuthAdmin;
 
-    res.status(201).json({ success: true, message: 'Registratie succesvol!', mosque: newMosque, admin: newAppAdmin });
+    try {
+        // Stap 2: Maak het moskee-record aan
+        const { data, error } = await supabase.from('mosques').insert([{
+            name: mosqueName, 
+            subdomain: normalizedSubdomain, 
+            admin_email: normalizedAdminEmail, // ✅ Bewaar admin email
+            ...req.body
+        }]).select().single();
+        if (error) throw error;
+        newMosque = data;
+
+        // Stap 3: Maak de Supabase Auth gebruiker aan
+        console.log(`Creating auth user for email: ${normalizedAdminEmail}`);
+        const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+            email: normalizedAdminEmail,
+            password: adminPassword,
+            email_confirm: true // ✅ Auto-bevestig email
+        });
+        
+        if (authError) {
+          console.error("Auth user creation failed:", authError);
+          
+          // ✅ Specifieke error handling voor duplicates
+          if (authError.message && (
+            authError.message.includes('User already registered') ||
+            authError.message.includes('already been registered') ||
+            authError.code === '422'
+          )) {
+            throw new Error('EMAIL_ALREADY_EXISTS');
+          }
+          
+          throw authError;
+        }
+        
+        supabaseAuthAdmin = authData.user;
+        console.log(`Auth user created successfully: ${supabaseAuthAdmin.id}`);
+        
+        // Stap 4: Maak het profiel aan in de public.users tabel
+        const { data: newAppAdmin, error: appAdminError } = await supabase.from('users').insert([{
+            id: supabaseAuthAdmin.id,
+            mosque_id: newMosque.id,
+            email: normalizedAdminEmail,
+            name: adminName,
+            role: 'admin',
+            created_at: new Date().toISOString()
+        }]).select('id, email, name, role').single();
+        
+        if (appAdminError) {
+          console.error("App user creation failed:", appAdminError);
+          throw appAdminError;
+        }
+
+        console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
+        
+        // Alles is gelukt, stuur succesrespons
+        res.status(201).json({ 
+          success: true, 
+          message: 'Registratie succesvol!', 
+          mosque: newMosque, 
+          admin: newAppAdmin 
+        });
+
+    } catch (error) {
+        // ✅ VERBETERDE ROLLBACK met betere logging
+        console.error("!!! REGISTRATION ERROR - STARTING ROLLBACK !!!");
+        console.error("Error details:", {
+          message: error.message,
+          code: error.code,
+          status: error.status
+        });
+        
+        // Rollback in omgekeerde volgorde
+        try {
+          if (supabaseAuthAdmin) {
+            console.log(`Rollback: Deleting auth user ${supabaseAuthAdmin.id}...`);
+            const { error: deleteError } = await supabase.auth.admin.deleteUser(
+              supabaseAuthAdmin.id, 
+              true // ✅ Hard delete to prevent ghost users
+            );
+            if (deleteError) {
+              console.error("Failed to delete auth user during rollback:", deleteError);
+            } else {
+              console.log("✅ Auth user deleted successfully");
+            }
+          }
+          
+          if (newMosque) {
+            console.log(`Rollback: Deleting mosque ${newMosque.id}...`);
+            const { error: mosqueDeleteError } = await supabase
+              .from('mosques')
+              .delete()
+              .eq('id', newMosque.id);
+            if (mosqueDeleteError) {
+              console.error("Failed to delete mosque during rollback:", mosqueDeleteError);
+            } else {
+              console.log("✅ Mosque deleted successfully");
+            }
+          }
+        } catch (rollbackError) {
+          console.error("!!! ROLLBACK FAILED !!!", rollbackError);
+          // Continue with error response anyway
+        }
+
+        // ✅ Betere error responses
+        if (error.message === 'EMAIL_ALREADY_EXISTS') {
+          return sendError(res, 409, 'Dit emailadres is al geregistreerd.', null, req);
+        }
+        
+        if (error.message && error.message.includes('subdomain')) {
+          return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
+        }
+        
+        // Algemene fout
+        const friendlyMessage = 'Registratie mislukt. Probeer het opnieuw of neem contact op met support.';
+        return sendError(res, 500, friendlyMessage, error.message, req);
+    }
+  } catch (outerError) {
+    console.error("!!! OUTER REGISTRATION ERROR !!!", outerError);
+    return sendError(res, 500, 'Interne serverfout tijdens registratie.', outerError.message, req);
+  }
+});
+
+// ✅ NIEUWE UTILITY ROUTE: Check if email exists
+router.post('/mosques/check-email', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return sendError(res, 400, 'Email is verplicht.', null, req);
+    
+    const normalizedEmail = email.toLowerCase().trim();
+    
+    try {
+      const { data: users, error } = await supabase.auth.admin.listUsers();
+      if (error) throw error;
+      
+      const existingUser = users.users.find(user => 
+        user.email === normalizedEmail && 
+        !user.deleted_at &&
+        user.email_confirmed_at
+      );
+      
+      res.json({ 
+        exists: !!existingUser,
+        message: existingUser ? 'Email bestaat al' : 'Email beschikbaar'
+      });
+    } catch (error) {
+      // Fallback: return that we can't check
+      res.json({ 
+        exists: false, 
+        message: 'Kon email niet controleren',
+        warning: true 
+      });
+    }
   } catch (error) {
-    sendError(res, error.code === '23505' ? 409 : (error.status || 500), error.message || 'Fout bij registratie.', error, req);
+    sendError(res, 500, 'Fout bij controleren email.', error.message, req);
   }
 });
 
