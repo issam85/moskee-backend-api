@@ -22,7 +22,7 @@ const lessonRoutes = require('./routes/lessonRoutes');
 const reportRoutes = require('./routes/reportRoutes');
 const quranRoutes = require('./routes/quranRoutes');
 const emailRoutes = require('./routes/emailRoutes');
-const debugRoutes = require('./routes/debugRoutes'); // NEW
+const debugRoutes = require('./routes/debugRoutes');
 const { handleStripeWebhook } = require('./services/stripeService');
 
 const app = express();
@@ -68,33 +68,28 @@ app.get('/api/health', (req, res) => {
 // --- Debug Routes (development only) ---
 app.use('/api/debug', debugRoutes);
 
-// --- Authenticated Route Setup ---
-// 1. Koppel de router voor publieke endpoints (login/register)
-app.use('/api', authRoutes); // Bevat /auth/login, /mosques/register
+// --- Route Setup ---
+// 1. Publieke routes (geen authenticatie nodig)
+app.use('/api', authRoutes); // Handelt /api/auth/login en /api/mosques/register af
 
-// 2. Pas de authenticatie middleware toe op alle volgende routes
-app.use(authMiddleware);
+// 2. Beveiligde routes (authenticatie vereist)
+app.use(authMiddleware); // Authenticatie middleware
+app.use(checkSubscription); // Abonnementscheck
 
-// 3. Pas de abonnementscheck toe
-app.use(checkSubscription);
-
-// 4. Koppel alle beveiligde API-routes
-app.use('/api/mosques', mosqueRoutes);
+// 3. Beveiligde API endpoints
+app.use('/api/mosques', mosqueRoutes); // Handelt /api/mosques/:id, etc. af
 app.use('/api/users', userRoutes);
 app.use('/api/classes', classRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/payments', paymentRoutes);
-app.use('/api/lessen', lessonRoutes); // Voor individuele les-acties
+app.use('/api/lessen', lessonRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/quran', quranRoutes);
 app.use('/api/email', emailRoutes);
 
 // --- Error Handling ---
-// Vang alle niet-gedefinieerde routes op
 app.use('*', routeNotFoundHandler);
-// Globale error handler
 app.use(globalErrorHandler);
-
 
 // --- Server Start ---
 app.listen(PORT, () => {
