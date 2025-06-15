@@ -2,6 +2,8 @@
 const { Resend } = require('resend');
 const { supabase } = require('../config/database');
 const axios = require('axios');
+const RESEND_SENDER_NAME = "MijnLVS";
+const RESEND_SENDER_EMAIL = `noreply@${process.env.RESEND_DOMAIN || 'mijnlvs.nl'}`;
 
 // Initialize Resend
 let resend = null;
