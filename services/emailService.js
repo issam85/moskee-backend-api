@@ -51,8 +51,14 @@ const sendEmail = async (emailDetails) => {
 };
 
 // ✅ RESEND EMAIL FUNCTIE
+// ✅ COMPLETE RESEND EMAIL FUNCTIE - Enhanced Debug Version
 const sendEmailViaResend = async (emailDetails) => {
     const { to, subject, body, emailType, fromName = 'MijnLVS', replyTo = null } = emailDetails;
+    
+    console.log(`🔧 [RESEND DEBUG] Starting email send process...`);
+    console.log(`🔧 [RESEND DEBUG] To: ${to}`);
+    console.log(`🔧 [RESEND DEBUG] Subject: ${subject}`);
+    console.log(`🔧 [RESEND DEBUG] EmailType: ${emailType}`);
     
     if (!resend) {
         console.error('[RESEND] Resend not initialized - check RESEND_API_KEY');
@@ -66,9 +72,17 @@ const sendEmailViaResend = async (emailDetails) => {
     try {
         console.log(`📧 [RESEND] Sending ${emailType} to: ${to}`);
         
-        // Bepaal FROM adres
+        // ✅ ENHANCED: Debug environment variables
+        console.log(`🔧 [RESEND DEBUG] RESEND_DOMAIN: ${process.env.RESEND_DOMAIN}`);
+        console.log(`🔧 [RESEND DEBUG] API Key first 12 chars: ${process.env.RESEND_API_KEY?.substring(0, 12)}...`);
+        
+        // Bepaal FROM adres - SIMPLIFIED VERSION
         const fromDomain = process.env.RESEND_DOMAIN || 'onboarding.resend.dev';
-        const fromEmail = `${fromName} <noreply@${fromDomain}>`;
+        
+        // ✅ FIXED: Use simple email format (no display name)
+        const fromEmail = `noreply@${fromDomain}`;
+        
+        console.log(`🔧 [RESEND DEBUG] From email: ${fromEmail}`);
         
         // Resend email object
         const emailData = {
@@ -85,13 +99,43 @@ const sendEmailViaResend = async (emailDetails) => {
         // Voeg reply-to toe als opgegeven
         if (replyTo) {
             emailData.replyTo = replyTo;
+            console.log(`🔧 [RESEND DEBUG] Reply-to: ${replyTo}`);
         }
         
-        // Verstuur via Resend
-        const response = await resend.emails.send(emailData);
+        console.log(`🔧 [RESEND DEBUG] Complete email object:`, JSON.stringify(emailData, null, 2));
         
+        // ✅ ENHANCED: Try-catch specifically for Resend API call
+        let response;
+        try {
+            console.log(`🔧 [RESEND DEBUG] Calling resend.emails.send...`);
+            response = await resend.emails.send(emailData);
+            console.log(`🔧 [RESEND DEBUG] Raw Resend response:`, JSON.stringify(response, null, 2));
+        } catch (resendApiError) {
+            console.error('🔧 [RESEND DEBUG] Resend API Error - Full object:', resendApiError);
+            console.error('🔧 [RESEND DEBUG] Error name:', resendApiError.name);
+            console.error('🔧 [RESEND DEBUG] Error message:', resendApiError.message);
+            console.error('🔧 [RESEND DEBUG] Error stack:', resendApiError.stack);
+            
+            // Check for Resend-specific error format
+            if (resendApiError.response) {
+                console.error('🔧 [RESEND DEBUG] Response status:', resendApiError.response.status);
+                console.error('🔧 [RESEND DEBUG] Response data:', resendApiError.response.data);
+            }
+            
+            // Re-throw with enhanced info
+            throw new Error(`Resend API Error: ${resendApiError.message} | Name: ${resendApiError.name}`);
+        }
+        
+        // ✅ ENHANCED: Check response format
         if (response.error) {
-            throw new Error(response.error.message);
+            console.error(`🔧 [RESEND DEBUG] Response contains error:`, response.error);
+            throw new Error(`Resend Response Error: ${response.error.message || JSON.stringify(response.error)}`);
+        }
+
+        // ✅ ENHANCED: Validate response data
+        if (!response.data || !response.data.id) {
+            console.error(`🔧 [RESEND DEBUG] Invalid response format:`, response);
+            throw new Error(`Invalid Resend response format: ${JSON.stringify(response)}`);
         }
 
         console.log(`✅ [RESEND] Email sent successfully, ID: ${response.data.id}`);
@@ -115,9 +159,22 @@ const sendEmailViaResend = async (emailDetails) => {
         };
         
     } catch (error) {
-        console.error('[RESEND] Email failed:', error.message);
+        console.error('❌ [RESEND] Email failed - ENHANCED DEBUG:');
+        console.error('❌ [RESEND] Error type:', typeof error);
+        console.error('❌ [RESEND] Error constructor:', error.constructor.name);
+        console.error('❌ [RESEND] Error message:', error.message);
+        console.error('❌ [RESEND] Error string:', error.toString());
+        console.error('❌ [RESEND] Full error object:', error);
         
-        // Log fout naar database
+        // ✅ ENHANCED: Check if error has additional properties
+        Object.getOwnPropertyNames(error).forEach(prop => {
+            if (prop !== 'message' && prop !== 'stack' && prop !== 'name') {
+                console.error(`❌ [RESEND] Error.${prop}:`, error[prop]);
+            }
+        });
+        
+        // Log fout naar database met enhanced error info
+        const errorMessage = error.message || error.toString() || 'Unknown error occurred';
         await logEmailAttempt(
             emailDetails.mosqueId || null, 
             to, 
@@ -125,13 +182,17 @@ const sendEmailViaResend = async (emailDetails) => {
             body, 
             emailType, 
             'failed', 
-            error.message
+            errorMessage
         );
         
         return { 
             success: false, 
-            error: error.message,
-            service: 'resend'
+            error: errorMessage,
+            service: 'resend',
+            debugInfo: {
+                errorType: error.constructor.name,
+                errorString: error.toString()
+            }
         };
     }
 };

@@ -592,6 +592,28 @@ router.post('/test-resend-email', async (req, res) => {
     sendError(res, 500, 'Fout bij testen email service.', error.message, req);
   }
 });
+router.post('/debug-resend-direct', async (req, res) => {
+    try {
+        const { Resend } = require('resend');
+        const resend = new Resend(process.env.RESEND_API_KEY);
+        
+        const result = await resend.emails.send({
+            from: 'test@onboarding.resend.dev',
+            to: 'i.abdellaoui@gmail.com',
+            subject: 'Backend Direct Test',
+            html: '<p>Direct test!</p>'
+        });
+        
+        res.json({ success: true, result });
+    } catch (error) {
+        console.error('Direct Error:', error);
+        res.json({ 
+            success: false, 
+            error: error.message,
+            fullError: error.toString()
+        });
+    }
+});
 
 // ✅ TEST ROUTE voor payment linking
 router.post('/test-payment-linking', async (req, res) => {
