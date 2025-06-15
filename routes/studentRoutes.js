@@ -2,6 +2,7 @@
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
+const { checkUsageLimit } = require('../services/trialService');
 const { calculateAmountDueFromStaffel } = require('../services/calculationService');
 
 // GET all students for a mosque
@@ -22,6 +23,11 @@ router.get('/mosque/:mosqueId', async (req, res) => {
         sendError(res, 500, 'Fout bij ophalen leerlingen.', error.message, req);
     }
 });
+
+const limitCheck = await checkUsageLimit(req.user.mosque_id, 'students');
+if (!limitCheck.allowed) {
+    return sendError(res, 403, limitCheck.message, null, req);
+}
 
 // GET a single student
 router.get('/:studentId', async (req, res) => {
