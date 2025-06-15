@@ -1,4 +1,4 @@
-// server.js - Versie 3.0 (Refactored)
+// server.js - Versie 3.0 (Refactored with Trial Routes)
 // Deze file is nu de orchestrator. Het zet de server op, laadt middleware en koppelt de routes.
 const express = require('express');
 const cors = require('cors');
@@ -23,6 +23,7 @@ const reportRoutes = require('./routes/reportRoutes');
 const quranRoutes = require('./routes/quranRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const debugRoutes = require('./routes/debugRoutes');
+const trialRoutes = require('./routes/trialRoutes'); // ✅ ADD THIS LINE
 const { handleStripeWebhook } = require('./services/stripeService');
 
 const app = express();
@@ -86,6 +87,7 @@ app.use('/api/lessen', lessonRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/quran', quranRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api/trial', trialRoutes); // ✅ ADD THIS LINE
 
 // --- Error Handling ---
 app.use('*', routeNotFoundHandler);

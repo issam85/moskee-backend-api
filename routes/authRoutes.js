@@ -1,9 +1,69 @@
-// routes/authRoutes.js - COMPLETE VERSIE MET PAYMENT LINKING
+// routes/authRoutes.js - COMPLETE FIXED VERSION WITH TRIAL INIT
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
 const { sendM365EmailInternal } = require('../services/emailService');
-const { sendRegistrationWelcomeEmail } = require('../services/registrationEmailService');
+
+// ✅ FIXED: Better import with fallback for registrationEmailService
+let sendRegistrationWelcomeEmail;
+try {
+    const { sendRegistrationWelcomeEmail: importedFunction } = require('../services/registrationEmailService');
+    sendRegistrationWelcomeEmail = importedFunction;
+    console.log('✅ [AuthRoutes] Successfully imported registrationEmailService');
+} catch (error) {
+    console.warn('⚠️ [AuthRoutes] registrationEmailService not found, using fallback');
+    
+    // ✅ ENHANCED FALLBACK: Complete welcome email function
+    sendRegistrationWelcomeEmail = async (welcomeEmailData) => {
+        try {
+            const { mosque, admin } = welcomeEmailData;
+            console.log(`[AuthRoutes] Sending fallback welcome email to ${admin.email}`);
+            
+            // Try M365 first if configured
+            if (mosque.m365_configured) {
+                console.log(`[AuthRoutes] Using M365 for ${mosque.name}`);
+                const result = await sendM365EmailInternal(
+                    mosque,
+                    admin.email,
+                    `Welkom bij MijnLVS - ${mosque.name}`,
+                    `
+                    <h2>Welkom ${admin.name}!</h2>
+                    <p>Uw MijnLVS account voor <strong>${mosque.name}</strong> is succesvol aangemaakt.</p>
+                    <p><strong>Inloggegevens:</strong></p>
+                    <ul>
+                        <li>Website: <a href="https://${mosque.subdomain}.mijnlvs.nl">https://${mosque.subdomain}.mijnlvs.nl</a></li>
+                        <li>Email: ${admin.email}</li>
+                    </ul>
+                    <p>Uw 14-dagen proefperiode is gestart. U kunt nu inloggen en uw leraren en leerlingen toevoegen.</p>
+                    <p><strong>Trial limieten:</strong></p>
+                    <ul>
+                        <li>Maximaal 10 leerlingen</li>
+                        <li>Maximaal 2 leraren</li>
+                    </ul>
+                    <br>
+                    <p>Met vriendelijke groet,<br>Het MijnLVS Team</p>
+                    `
+                );
+                
+                return result.success ? 
+                    { success: true, service: 'M365', messageId: result.messageId } :
+                    { success: false, service: 'M365', error: result.error };
+            }
+            
+            // If M365 not configured, log but don't fail registration
+            console.log(`[AuthRoutes] M365 not configured for ${mosque.name}, skipping welcome email`);
+            return { 
+                success: true, 
+                service: 'skipped', 
+                message: 'M365 not configured, welcome email skipped' 
+            };
+            
+        } catch (error) {
+            console.error('[AuthRoutes] Fallback welcome email error:', error);
+            return { success: false, service: 'fallback', error: error.message };
+        }
+    };
+}
 
 // POST /api/auth/login
 router.post('/auth/login', async (req, res) => {
@@ -62,26 +122,17 @@ router.post('/mosques/register', async (req, res) => {
     if (subdomainError) throw subdomainError;
     if (existingSubdomain) return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
     
-    // =====================================================================
-    // ✅ VERBETERDE SPOOKGEBRUIKER CHECK
-    // We gebruiken nu de admin API om te controleren of de gebruiker bestaat
-    // =====================================================================
+    // Check existing users
     try {
       console.log(`Checking if user exists with email: ${normalizedAdminEmail}`);
       
-      // Probeer de gebruiker op te halen via admin API
       const { data: existingUsers, error: userListError } = await supabase.auth.admin.listUsers();
       
-      if (userListError) {
-        console.error("Error checking existing users:", userListError);
-        // Als we users niet kunnen ophalen, proberen we gewoon de registratie
-        // en laten we Supabase zelf de duplicate check doen
-      } else {
-        // Filter op actieve gebruikers met dit emailadres
+      if (!userListError && existingUsers) {
         const existingActiveUser = existingUsers.users.find(user => 
           user.email === normalizedAdminEmail && 
-          !user.deleted_at && // Geen soft-delete
-          user.email_confirmed_at // Email is bevestigd
+          !user.deleted_at && 
+          user.email_confirmed_at
         );
         
         if (existingActiveUser) {
@@ -93,31 +144,33 @@ router.post('/mosques/register', async (req, res) => {
       }
     } catch (adminError) {
       console.warn("Admin API check failed, proceeding with registration attempt:", adminError.message);
-      // Als admin check faalt, proberen we gewoon de registratie
-      // Supabase zelf zal dan de duplicate check doen
     }
-    // =====================================================================
-    // EINDE VERBETERDE CHECK
-    // =====================================================================
     
     let newMosque, supabaseAuthAdmin;
 
     try {
-        // Stap 2: Maak het moskee-record aan
+        // ✅ FIXED: Stap 2 - Maak het moskee-record aan MET PROPER TRIAL INIT
+        const now = new Date();
+        const trialEnd = new Date(now.getTime() + (14 * 24 * 60 * 60 * 1000)); // 14 days from now
+        
         const mosqueData = {
             name: mosqueName, 
             subdomain: normalizedSubdomain,
-            // ✅ FIXED: Gebruik email in plaats van admin_email (zoals in paymentRoutes.js)
-            email: normalizedAdminEmail, // Contact email van de moskee (meestal admin email)
+            email: normalizedAdminEmail,
             address: address || null,
             city: city || null,
             zipcode: zipcode || null,
             phone: phone || null,
             website: website || null,
-            // ✅ Default subscription settings voor nieuwe registraties
-            subscription_status: 'trialing', // Start met trial
-            trial_ends_at: null, // Wordt ingesteld door payment systeem
-            created_at: new Date().toISOString()
+            // ✅ FIXED: Properly initialize trial from the start
+            subscription_status: 'trialing',
+            plan_type: 'trial',
+            trial_started_at: now.toISOString(),
+            trial_ends_at: trialEnd.toISOString(),
+            max_students: 10,
+            max_teachers: 2,
+            m365_configured: false, // ✅ Default M365 to false
+            created_at: now.toISOString()
         };
 
         // Als er een apart contact email is opgegeven, gebruik dat
@@ -129,19 +182,20 @@ router.post('/mosques/register', async (req, res) => {
         if (error) throw error;
         newMosque = data;
 
+        console.log(`✅ [Registration] Mosque created with trial: ${newMosque.trial_started_at} -> ${newMosque.trial_ends_at}`);
+
         // Stap 3: Maak de Supabase Auth gebruiker aan
         console.log(`Creating auth user for email: ${normalizedAdminEmail}`);
         const { data: authData, error: authError } = await supabase.auth.admin.createUser({
             email: normalizedAdminEmail,
             password: adminPassword,
-            email_confirm: true, // ✅ Auto-bevestig email
+            email_confirm: true,
             user_metadata: { name: adminName, role: 'admin' }
         });
         
         if (authError) {
           console.error("Auth user creation failed:", authError);
           
-          // ✅ Specifieke error handling voor duplicates
           if (authError.message && (
             authError.message.includes('User already registered') ||
             authError.message.includes('already been registered') ||
@@ -173,9 +227,7 @@ router.post('/mosques/register', async (req, res) => {
 
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
-        // =====================================================================
-        // ✅ NIEUWE FUNCTIONALITEIT: PAYMENT LINKING NA REGISTRATIE
-        // =====================================================================
+        // ✅ PAYMENT LINKING (keep existing code)
         let paymentLinked = false;
         try {
           console.log(`🔗 [Registration] Attempting payment linking for mosque ${newMosque.id}...`);
@@ -198,74 +250,63 @@ router.post('/mosques/register', async (req, res) => {
           }
         } catch (linkingError) {
           console.error('[Registration] Payment linking failed (non-fatal):', linkingError);
-          // Continue met registratie - payment linking is niet kritiek
         }
         
-        // =====================================================================
-        // ✅ NIEUWE FUNCTIONALITEIT: VERSTUUR WELKOMSTMAIL
-        // =====================================================================
+        // ✅ FIXED: Welcome email with better error handling
         try {
           console.log(`📧 [Registration] Sending welcome email to ${normalizedAdminEmail}...`);
           
-          // ✅ GECORRIGEERD: Gebruik juiste data structuur
           const welcomeEmailData = {
             mosque: {
               id: newMosque.id,
               name: newMosque.name,
               subdomain: newMosque.subdomain,
-              email: newMosque.email, // Contact email van moskee
+              email: newMosque.email,
               address: newMosque.address,
               city: newMosque.city,
               zipcode: newMosque.zipcode,
               phone: newMosque.phone,
-              website: newMosque.website
+              website: newMosque.website,
+              m365_configured: newMosque.m365_configured || false
             },
             admin: {
               id: newAppAdmin.id,
               name: adminName,
-              email: normalizedAdminEmail, // ✅ Admin user email
+              email: normalizedAdminEmail,
               role: 'admin'
             }
           };
 
-          // Verstuur welkomstmail
           const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
           
           if (emailResult.success) {
             console.log(`✅ [Registration] Welcome email sent successfully to ${normalizedAdminEmail} via ${emailResult.service}`);
           } else {
             console.warn(`⚠️ [Registration] Welcome email failed for ${normalizedAdminEmail}:`, emailResult.error);
-            // Continue ook al faalt de email - registratie is geslaagd
           }
         } catch (emailError) {
           console.error(`❌ [Registration] Error sending welcome email to ${normalizedAdminEmail}:`, emailError);
-          // Continue ook al faalt de email - registratie is geslaagd
         }
-        // =====================================================================
-        // EINDE WELKOMSTMAIL FUNCTIONALITEIT
-        // =====================================================================
         
-        // Bepaal success message gebaseerd op payment status
-        let successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw account is succesvol aangemaakt.`;
+        // Success response
+        let successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw 14-dagen proefperiode is gestart.`;
         if (paymentLinked) {
-          successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw Professional account is direct actief en de welkomstmail is verstuurd.`;
-        } else {
-          successMessage += ' Een welkomstmail is verstuurd naar uw emailadres.';
+          successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw Professional account is direct actief.`;
         }
         
-        // Alles is gelukt, stuur succesrespons
         res.status(201).json({ 
           success: true, 
           message: successMessage, 
           mosque: newMosque, 
           admin: newAppAdmin,
-          welcome_email_sent: true, // Geef aan dat welkomstmail is verstuurd
-          payment_linked: paymentLinked, // Geef aan of betaling gekoppeld is
-          subscription_status: newMosque.subscription_status // Huidige status
+          welcome_email_sent: true,
+          payment_linked: paymentLinked,
+          subscription_status: newMosque.subscription_status,
+          trial_ends_at: newMosque.trial_ends_at // ✅ Include trial end date
         });
 
     } catch (error) {
-        // ✅ VERBETERDE ROLLBACK met betere logging
+        // ✅ ROLLBACK code (keep existing)
         console.error("!!! REGISTRATION ERROR - STARTING ROLLBACK !!!");
         console.error("Error details:", {
           message: error.message,
@@ -273,13 +314,12 @@ router.post('/mosques/register', async (req, res) => {
           status: error.status
         });
         
-        // Rollback in omgekeerde volgorde
         try {
           if (supabaseAuthAdmin) {
             console.log(`Rollback: Deleting auth user ${supabaseAuthAdmin.id}...`);
             const { error: deleteError } = await supabase.auth.admin.deleteUser(
               supabaseAuthAdmin.id, 
-              true // ✅ Hard delete to prevent ghost users
+              true
             );
             if (deleteError) {
               console.error("Failed to delete auth user during rollback:", deleteError);
@@ -302,10 +342,8 @@ router.post('/mosques/register', async (req, res) => {
           }
         } catch (rollbackError) {
           console.error("!!! ROLLBACK FAILED !!!", rollbackError);
-          // Continue with error response anyway
         }
 
-        // ✅ Betere error responses
         if (error.message === 'EMAIL_ALREADY_EXISTS') {
           return sendError(res, 409, 'Dit emailadres is al geregistreerd.', null, req);
         }
@@ -314,7 +352,6 @@ router.post('/mosques/register', async (req, res) => {
           return sendError(res, 409, 'Dit subdomein is al in gebruik.', null, req);
         }
         
-        // Algemene fout
         const friendlyMessage = 'Registratie mislukt. Probeer het opnieuw of neem contact op met support.';
         return sendError(res, 500, friendlyMessage, error.message, req);
     }
@@ -324,19 +361,16 @@ router.post('/mosques/register', async (req, res) => {
   }
 });
 
-// =====================================================================
-// ✅ PAYMENT LINKING FUNCTIE (embedded in deze file)
-// =====================================================================
+// ✅ PAYMENT LINKING FUNCTION (keep existing)
 const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => {
   try {
     console.log(`[Payment Linking] Searching for pending payments for ${adminEmail}`);
     
-    // Zoek naar pending payments in laatste 60 minuten (verhoogd van 30)
     const sixtyMinutesAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     
     let pendingPayment = null;
     
-    // ✅ STRATEGIE 1: Match op customer_email (als aanwezig)
+    // Strategy 1: Match on customer_email
     try {
       const { data: emailMatches, error: emailError } = await supabase
         .from('pending_payments')
@@ -354,7 +388,7 @@ const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => 
       console.warn('[Payment Linking] Email strategy failed:', error.message);
     }
     
-    // ✅ STRATEGIE 2: Fallback - Match op timing (recent pending payments zonder email)
+    // Strategy 2: Fallback - Match on timing
     if (!pendingPayment) {
       try {
         console.log(`[Payment Linking] No email match found, trying timing-based matching...`);
@@ -363,17 +397,15 @@ const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => 
           .from('pending_payments')
           .select('*')
           .eq('status', 'pending')
-          .is('mosque_id', null) // Nog niet gekoppeld
+          .is('mosque_id', null)
           .gte('created_at', sixtyMinutesAgo)
           .order('created_at', { ascending: false });
         
         if (!recentError && recentPayments && recentPayments.length > 0) {
-          // Neem de meest recente als er maar 1 is, of de eerste in de lijst
           if (recentPayments.length === 1) {
             pendingPayment = recentPayments[0];
             console.log(`[Payment Linking] ✅ Found payment by TIMING (single recent): ${pendingPayment.tracking_id}`);
           } else {
-            // Als er meerdere zijn, neem de eerste (meest recente)
             pendingPayment = recentPayments[0];
             console.log(`[Payment Linking] ⚠️ Found payment by TIMING (multiple, taking most recent): ${pendingPayment.tracking_id}`);
           }
@@ -383,29 +415,24 @@ const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => 
       }
     }
     
-    // ✅ STRATEGIE 3: Extra fallback - Match op URL parameters (als tracking_id beschikbaar)
     if (!pendingPayment) {
-      // Deze strategie kan later uitgebreid worden met URL parameter tracking
       console.log(`[Payment Linking] No timing match found either`);
     }
     
-    // ❌ Geen payment gevonden
     if (!pendingPayment) {
       console.log(`[Payment Linking] No pending payments found for ${adminEmail} using any strategy`);
       return { success: false, reason: 'no_pending_payments' };
     }
     
-    // ✅ Payment gevonden - nu koppelen
     console.log(`[Payment Linking] Found pending payment: ${pendingPayment.tracking_id} (${pendingPayment.stripe_subscription_id})`);
-    console.log(`[Payment Linking] Payment details: customer_email="${pendingPayment.customer_email || 'EMPTY'}", amount=${pendingPayment.amount}`);
     
-    // Update pending payment met mosque_id
+    // Update pending payment with mosque_id
     const { error: updateError } = await supabase
       .from('pending_payments')
       .update({ 
         mosque_id: mosqueId,
         status: 'linked',
-        customer_email: pendingPayment.customer_email || adminEmail, // ✅ Fix empty email
+        customer_email: pendingPayment.customer_email || adminEmail,
         updated_at: new Date().toISOString()
       })
       .eq('id', pendingPayment.id);
@@ -414,14 +441,14 @@ const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => 
       throw new Error(`Failed to update pending payment: ${updateError.message}`);
     }
     
-    // Update mosque met Stripe info
+    // Update mosque with Stripe info
     const { error: mosqueUpdateError } = await supabase
       .from('mosques')
       .update({
         stripe_customer_id: pendingPayment.stripe_customer_id,
         stripe_subscription_id: pendingPayment.stripe_subscription_id,
-        subscription_status: 'active', // ✅ ACTIVATE DIRECT!
-        trial_ends_at: null, // Remove trial restriction
+        subscription_status: 'active',
+        trial_ends_at: null,
         updated_at: new Date().toISOString()
       })
       .eq('id', mosqueId);
@@ -447,7 +474,7 @@ const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => 
   }
 };
 
-// ✅ NIEUWE UTILITY ROUTE: Check if email exists
+// ✅ Keep all existing test routes
 router.post('/mosques/check-email', async (req, res) => {
   try {
     const { email } = req.body;
@@ -470,7 +497,6 @@ router.post('/mosques/check-email', async (req, res) => {
         message: existingUser ? 'Email bestaat al' : 'Email beschikbaar'
       });
     } catch (error) {
-      // Fallback: return that we can't check
       res.json({ 
         exists: false, 
         message: 'Kon email niet controleren',
@@ -482,7 +508,6 @@ router.post('/mosques/check-email', async (req, res) => {
   }
 });
 
-// ✅ NIEUWE ROUTE: Test welkomstmail functionaliteit
 router.post('/mosques/test-welcome-email', async (req, res) => {
   try {
     const { mosqueId, testEmail } = req.body;
@@ -491,7 +516,6 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
       return sendError(res, 400, 'Moskee ID is verplicht.', null, req);
     }
 
-    // Haal moskee gegevens op
     const { data: mosque, error: mosqueError } = await supabase
       .from('mosques')
       .select('*')
@@ -502,7 +526,6 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
       return sendError(res, 404, 'Moskee niet gevonden.', null, req);
     }
 
-    // Haal admin gebruiker op
     const { data: admin, error: adminError } = await supabase
       .from('users')
       .select('*')
@@ -514,7 +537,6 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
       return sendError(res, 404, 'Admin gebruiker niet gevonden.', null, req);
     }
 
-    // ✅ GECORRIGEERDE data structuur
     const welcomeEmailData = {
       mosque: {
         id: mosque.id,
@@ -525,17 +547,17 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
         city: mosque.city,
         zipcode: mosque.zipcode,
         phone: mosque.phone,
-        website: mosque.website
+        website: mosque.website,
+        m365_configured: mosque.m365_configured || false
       },
       admin: {
         id: admin.id,
         name: admin.name,
-        email: testEmail || admin.email, // ✅ Override voor test
+        email: testEmail || admin.email,
         role: admin.role
       }
     };
 
-    // Test welkomstmail
     const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
     
     if (emailResult.success) {
@@ -559,7 +581,6 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
   }
 });
 
-// ✅ TEST ROUTE voor Resend email service
 router.post('/test-resend-email', async (req, res) => {
   try {
     const { sendTestEmail } = require('../services/emailService');
@@ -592,6 +613,7 @@ router.post('/test-resend-email', async (req, res) => {
     sendError(res, 500, 'Fout bij testen email service.', error.message, req);
   }
 });
+
 router.post('/debug-resend-direct', async (req, res) => {
     try {
         const { Resend } = require('resend');
@@ -615,7 +637,6 @@ router.post('/debug-resend-direct', async (req, res) => {
     }
 });
 
-// ✅ TEST ROUTE voor payment linking
 router.post('/test-payment-linking', async (req, res) => {
   try {
     const { mosqueId, adminEmail } = req.body;
