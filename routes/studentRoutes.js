@@ -1,4 +1,4 @@
-// routes/studentRoutes.js - Extended version
+// routes/studentRoutes.js - FIXED VERSION - await was outside function
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
@@ -23,11 +23,6 @@ router.get('/mosque/:mosqueId', async (req, res) => {
         sendError(res, 500, 'Fout bij ophalen leerlingen.', error.message, req);
     }
 });
-
-const limitCheck = await checkUsageLimit(req.user.mosque_id, 'students');
-if (!limitCheck.allowed) {
-    return sendError(res, 403, limitCheck.message, null, req);
-}
 
 // GET a single student
 router.get('/:studentId', async (req, res) => {
@@ -62,6 +57,12 @@ router.post('/', async (req, res) => {
     try {
         if (!mosque_id || !parent_id || !class_id || !name) {
             return sendError(res, 400, "Verplichte velden (mosque_id, parent_id, class_id, name) ontbreken.", null, req);
+        }
+        
+        // ✅ FIXED: Added usage limit check inside the async function
+        const limitCheck = await checkUsageLimit(req.user.mosque_id, 'students');
+        if (!limitCheck.allowed) {
+            return sendError(res, 403, limitCheck.message || 'Limiet bereikt.', null, req);
         }
         
         const { data: student, error } = await supabase
@@ -115,6 +116,12 @@ router.post('/mosque/:mosqueId', async (req, res) => {
 
         if (!req.user || req.user.role !== 'teacher') {
             return sendError(res, 403, 'Alleen leraren mogen studenten toevoegen via deze route', null, req);
+        }
+
+        // ✅ FIXED: Added usage limit check inside the async function
+        const limitCheck = await checkUsageLimit(req.user.mosque_id, 'students');
+        if (!limitCheck.allowed) {
+            return sendError(res, 403, limitCheck.message || 'Limiet bereikt.', null, req);
         }
 
         // Verify teacher owns the class
