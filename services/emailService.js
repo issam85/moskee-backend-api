@@ -50,8 +50,7 @@ const sendEmail = async (emailDetails) => {
     return await sendEmailViaResend(emailDetails);
 };
 
-// ✅ RESEND EMAIL FUNCTIE
-// ✅ COMPLETE RESEND EMAIL FUNCTIE - Enhanced Debug Version
+// ✅ RESEND EMAIL FUNCTIE - EXACT DEBUG CALL VERSION
 const sendEmailViaResend = async (emailDetails) => {
     const { to, subject, body, emailType, fromName = 'MijnLVS', replyTo = null } = emailDetails;
     
@@ -76,39 +75,22 @@ const sendEmailViaResend = async (emailDetails) => {
         console.log(`🔧 [RESEND DEBUG] RESEND_DOMAIN: ${process.env.RESEND_DOMAIN}`);
         console.log(`🔧 [RESEND DEBUG] API Key first 12 chars: ${process.env.RESEND_API_KEY?.substring(0, 12)}...`);
         
-        // Bepaal FROM adres - SIMPLIFIED VERSION
-        const fromDomain = process.env.RESEND_DOMAIN || 'onboarding.resend.dev';
-        
-        // ✅ FIXED: Use simple email format (no display name)
-        const fromEmail = 'test@onboarding.resend.dev';
-        
-        console.log(`🔧 [RESEND DEBUG] From email: ${fromEmail}`);
-        
-        // Resend email object
-        const emailData = {
-            from: fromEmail,
-            to: [to],
-            subject: subject,
-            html: body,
-            tags: [
-                { name: 'category', value: emailType },
-                { name: 'environment', value: process.env.NODE_ENV || 'development' }
-            ]
-        };
-        
-        // Voeg reply-to toe als opgegeven
-        if (replyTo) {
-            emailData.replyTo = replyTo;
-            console.log(`🔧 [RESEND DEBUG] Reply-to: ${replyTo}`);
-        }
-        
-        console.log(`🔧 [RESEND DEBUG] Complete email object:`, JSON.stringify(emailData, null, 2));
+        // ✅ EXACT SAME CALL AS DEBUG ROUTE (no variables, no complexity)
+        console.log(`🔧 [RESEND DEBUG] Using EXACT same call as debug route...`);
         
         // ✅ ENHANCED: Try-catch specifically for Resend API call
         let response;
         try {
-            console.log(`🔧 [RESEND DEBUG] Calling resend.emails.send...`);
-            response = await resend.emails.send(emailData);
+            console.log(`🔧 [RESEND DEBUG] Calling resend.emails.send with EXACT debug parameters...`);
+            
+            // ✅ EXACT SAME CALL AS WORKING DEBUG ROUTE
+            response = await resend.emails.send({
+                from: 'test@onboarding.resend.dev',
+                to: 'i.abdellaoui@gmail.com',
+                subject: 'Backend Direct Test',
+                html: '<p>Backend direct test!</p>'
+            });
+            
             console.log(`🔧 [RESEND DEBUG] Raw Resend response:`, JSON.stringify(response, null, 2));
         } catch (resendApiError) {
             console.error('🔧 [RESEND DEBUG] Resend API Error - Full object:', resendApiError);
