@@ -80,7 +80,7 @@ const sendEmailViaResend = async (emailDetails) => {
         const fromDomain = process.env.RESEND_DOMAIN || 'onboarding.resend.dev';
         
         // ✅ FIXED: Use simple email format (no display name)
-        const fromEmail = `noreply@${fromDomain}`;
+        const fromEmail = 'test@onboarding.resend.dev';
         
         console.log(`🔧 [RESEND DEBUG] From email: ${fromEmail}`);
         
