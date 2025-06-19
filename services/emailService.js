@@ -76,7 +76,7 @@ const sendEmailViaResend = async (emailDetails) => {
         // ✅ VERBETERD: Gebruik de juiste configuratie in plaats van test-waarden
         const emailPayload = {
             // ✅ BELANGRIJKSTE VERBETERING: Gebruik je eigen domein in plaats van test domein
-            from: `${fromName} <${RESEND_SENDER_EMAIL}>`,
+            from: `MijnLVS <${RESEND_SENDER_EMAIL}>`,
             
             to: Array.isArray(to) ? to : [to],
             subject: subject,
