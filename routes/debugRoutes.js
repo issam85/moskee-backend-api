@@ -242,6 +242,7 @@ router.post('/test-email', async (req, res) => {
 
 // ✅ NEW: POST test Resend email functionality
 router.post('/test-resend-email', async (req, res) => {
+    
     const { testEmail } = req.body;
     if (!testEmail) {
         return sendError(res, 400, "Test email adres is verplicht.", null, req);
