@@ -52,14 +52,14 @@ const sendEmail = async (emailDetails) => {
     return await sendEmailViaResend(emailDetails);
 };
 
-// ✅ RESEND EMAIL FUNCTIE - EXACT DEBUG CALL VERSION
+// ✅ VERBETERDE RESEND EMAIL FUNCTIE
 const sendEmailViaResend = async (emailDetails) => {
     const { to, subject, body, emailType, fromName = 'MijnLVS', replyTo = null } = emailDetails;
     
-    console.log(`🔧 [RESEND DEBUG] Starting email send process...`);
-    console.log(`🔧 [RESEND DEBUG] To: ${to}`);
-    console.log(`🔧 [RESEND DEBUG] Subject: ${subject}`);
-    console.log(`🔧 [RESEND DEBUG] EmailType: ${emailType}`);
+    console.log(`📧 [RESEND] Starting email send process...`);
+    console.log(`📧 [RESEND] To: ${to}`);
+    console.log(`📧 [RESEND] Subject: ${subject}`);
+    console.log(`📧 [RESEND] EmailType: ${emailType}`);
     
     if (!resend) {
         console.error('[RESEND] Resend not initialized - check RESEND_API_KEY');
@@ -73,56 +73,40 @@ const sendEmailViaResend = async (emailDetails) => {
     try {
         console.log(`📧 [RESEND] Sending ${emailType} to: ${to}`);
         
-        // ✅ ENHANCED: Debug environment variables
-        console.log(`🔧 [RESEND DEBUG] RESEND_DOMAIN: ${process.env.RESEND_DOMAIN}`);
-        console.log(`🔧 [RESEND DEBUG] API Key first 12 chars: ${process.env.RESEND_API_KEY?.substring(0, 12)}...`);
+        // ✅ VERBETERD: Gebruik de juiste configuratie in plaats van test-waarden
+        const emailPayload = {
+            // ✅ BELANGRIJKSTE VERBETERING: Gebruik je eigen domein in plaats van test domein
+            from: `${fromName} <${RESEND_SENDER_EMAIL}>`,
+            
+            to: Array.isArray(to) ? to : [to],
+            subject: subject,
+            html: body
+        };
         
-        // ✅ EXACT SAME CALL AS DEBUG ROUTE (no variables, no complexity)
-        console.log(`🔧 [RESEND DEBUG] Using EXACT same call as debug route...`);
-        
-        // ✅ ENHANCED: Try-catch specifically for Resend API call
-        let response;
-        try {
-            console.log(`🔧 [RESEND DEBUG] Calling resend.emails.send with EXACT debug parameters...`);
-            
-            // ✅ EXACT SAME CALL AS WORKING DEBUG ROUTE
-            response = await resend.emails.send({
-                from: 'test@onboarding.resend.dev',
-                to: 'i.abdellaoui@gmail.com',
-                subject: 'Backend Direct Test',
-                html: '<p>Backend direct test!</p>'
-            });
-            
-            console.log(`🔧 [RESEND DEBUG] Raw Resend response:`, JSON.stringify(response, null, 2));
-        } catch (resendApiError) {
-            console.error('🔧 [RESEND DEBUG] Resend API Error - Full object:', resendApiError);
-            console.error('🔧 [RESEND DEBUG] Error name:', resendApiError.name);
-            console.error('🔧 [RESEND DEBUG] Error message:', resendApiError.message);
-            console.error('🔧 [RESEND DEBUG] Error stack:', resendApiError.stack);
-            
-            // Check for Resend-specific error format
-            if (resendApiError.response) {
-                console.error('🔧 [RESEND DEBUG] Response status:', resendApiError.response.status);
-                console.error('🔧 [RESEND DEBUG] Response data:', resendApiError.response.data);
-            }
-            
-            // Re-throw with enhanced info
-            throw new Error(`Resend API Error: ${resendApiError.message} | Name: ${resendApiError.name}`);
+        // Voeg reply-to toe indien aanwezig
+        if (replyTo) {
+            emailPayload.reply_to = replyTo;
         }
         
-        // ✅ ENHANCED: Check response format
-        if (response.error) {
-            console.error(`🔧 [RESEND DEBUG] Response contains error:`, response.error);
-            throw new Error(`Resend Response Error: ${response.error.message || JSON.stringify(response.error)}`);
+        console.log(`📧 [RESEND] Using sender: ${emailPayload.from}`);
+        console.log(`📧 [RESEND] Domain configured: ${process.env.RESEND_DOMAIN || 'mijnlvs.nl'}`);
+        
+        // ✅ VERBETERD: Gebruik de correcte Resend API call
+        const { data, error } = await resend.emails.send(emailPayload);
+        
+        // ✅ VERBETERD: Check voor Resend SDK errors
+        if (error) {
+            console.error(`❌ [RESEND] Resend SDK Error:`, error);
+            throw new Error(`Resend SDK Error: ${error.message || JSON.stringify(error)}`);
+        }
+        
+        // ✅ VERBETERD: Valideer response data
+        if (!data || !data.id) {
+            console.error(`❌ [RESEND] Invalid response format:`, { data, error });
+            throw new Error(`Invalid Resend response format: ${JSON.stringify({ data, error })}`);
         }
 
-        // ✅ ENHANCED: Validate response data
-        if (!response.data || !response.data.id) {
-            console.error(`🔧 [RESEND DEBUG] Invalid response format:`, response);
-            throw new Error(`Invalid Resend response format: ${JSON.stringify(response)}`);
-        }
-
-        console.log(`✅ [RESEND] Email sent successfully, ID: ${response.data.id}`);
+        console.log(`✅ [RESEND] Email sent successfully, ID: ${data.id}`);
         
         // Log naar database
         await logEmailAttempt(
@@ -133,31 +117,22 @@ const sendEmailViaResend = async (emailDetails) => {
             emailType, 
             'sent', 
             null, 
-            response.data.id
+            data.id
         );
         
         return { 
             success: true, 
-            messageId: response.data.id,
+            messageId: data.id,
             service: 'resend'
         };
         
     } catch (error) {
-        console.error('❌ [RESEND] Email failed - ENHANCED DEBUG:');
+        console.error('❌ [RESEND] Email failed:');
         console.error('❌ [RESEND] Error type:', typeof error);
         console.error('❌ [RESEND] Error constructor:', error.constructor.name);
         console.error('❌ [RESEND] Error message:', error.message);
-        console.error('❌ [RESEND] Error string:', error.toString());
-        console.error('❌ [RESEND] Full error object:', error);
         
-        // ✅ ENHANCED: Check if error has additional properties
-        Object.getOwnPropertyNames(error).forEach(prop => {
-            if (prop !== 'message' && prop !== 'stack' && prop !== 'name') {
-                console.error(`❌ [RESEND] Error.${prop}:`, error[prop]);
-            }
-        });
-        
-        // Log fout naar database met enhanced error info
+        // Log fout naar database
         const errorMessage = error.message || error.toString() || 'Unknown error occurred';
         await logEmailAttempt(
             emailDetails.mosqueId || null, 
@@ -297,7 +272,7 @@ const sendBulkEmails = async (emailList) => {
     }
 };
 
-// ✅ TEST EMAIL FUNCTIE
+// ✅ VERBETERDE TEST EMAIL FUNCTIE
 const sendTestEmail = async (testEmailAddress) => {
     console.log(`🧪 [RESEND TEST] Sending test email to ${testEmailAddress}`);
     
@@ -314,6 +289,7 @@ const sendTestEmail = async (testEmailAddress) => {
                         <li>Resend API Key: Geconfigureerd</li>
                         <li>Email Service: Actief</li>
                         <li>Database Logging: Werkend</li>
+                        <li>Domein: ${process.env.RESEND_DOMAIN || 'mijnlvs.nl'}</li>
                     </ul>
                 </div>
                 <p>Tijd: ${new Date().toLocaleString('nl-NL')}</p>
