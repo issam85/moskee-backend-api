@@ -1,9 +1,39 @@
-// routes/authRoutes.js - COMPLETE FIXED VERSION WITH TRIAL INIT
+// routes/authRoutes.js - DEFINITIEVE VERSIE ZONDER CYCLISCHE DEPENDENCIES
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
-const { sendM365EmailInternal } = require('../services/emailService');
-const { sendRegistrationWelcomeEmail } = require('../services/registrationEmailService');
+
+// ✅ LAZY LOADING: Import services alleen wanneer nodig
+let registrationEmailService = null;
+let paymentLinkingService = null;
+
+// Lazy load functie voor email service
+const getRegistrationEmailService = () => {
+  if (!registrationEmailService) {
+    try {
+      registrationEmailService = require('../services/registrationEmailService');
+      console.log('✅ registrationEmailService geladen:', typeof registrationEmailService.sendRegistrationWelcomeEmail);
+    } catch (error) {
+      console.error('❌ Fout bij laden registrationEmailService:', error.message);
+      registrationEmailService = { sendRegistrationWelcomeEmail: null };
+    }
+  }
+  return registrationEmailService;
+};
+
+// Lazy load functie voor payment service
+const getPaymentLinkingService = () => {
+  if (!paymentLinkingService) {
+    try {
+      paymentLinkingService = require('../services/paymentLinkingService');
+      console.log('✅ paymentLinkingService geladen:', typeof paymentLinkingService.linkPendingPaymentAfterRegistration);
+    } catch (error) {
+      console.error('❌ Fout bij laden paymentLinkingService:', error.message);
+      paymentLinkingService = { linkPendingPaymentAfterRegistration: null };
+    }
+  }
+  return paymentLinkingService;
+};
 
 // POST /api/auth/login
 router.post('/auth/login', async (req, res) => {
@@ -27,13 +57,12 @@ router.post('/auth/login', async (req, res) => {
     // Verifieer dat deze gebruiker bij deze moskee hoort
     const { data: appUser, error: appUserError } = await supabase.from('users').select('*').eq('id', supabaseAuthUser.id).eq('mosque_id', mosque.id).single();
     if (appUserError || !appUser) {
-        await supabase.auth.signOut(); // Log de ongeldige sessie uit
+        await supabase.auth.signOut();
         return sendError(res, 401, 'Gebruiker is niet gekoppeld aan deze moskee.', null, req);
     }
 
     await supabase.from('users').update({ last_login: new Date() }).eq('id', appUser.id);
     
-    // Stuur de sessie token en gebruikersprofiel terug
     res.json({ success: true, user: appUser, session });
   } catch (error) {
     sendError(res, 500, 'Interne serverfout tijdens login.', error.message, req);
@@ -56,7 +85,7 @@ router.post('/mosques/register', async (req, res) => {
     const normalizedSubdomain = subdomain.toLowerCase().trim();
     const normalizedAdminEmail = adminEmail.toLowerCase().trim();
     
-    // Check 1: Bestaat het subdomein al in de 'mosques' tabel?
+    // Check subdomain
     const { data: existingSubdomain, error: subdomainError } = await supabase
       .from('mosques').select('id').eq('subdomain', normalizedSubdomain).maybeSingle();
     if (subdomainError) throw subdomainError;
@@ -89,9 +118,9 @@ router.post('/mosques/register', async (req, res) => {
     let newMosque, supabaseAuthAdmin;
 
     try {
-        // ✅ FIXED: Stap 2 - Maak het moskee-record aan MET PROPER TRIAL INIT
+        // Stap 2 - Maak het moskee-record aan
         const now = new Date();
-        const trialEnd = new Date(now.getTime() + (14 * 24 * 60 * 60 * 1000)); // 14 days from now
+        const trialEnd = new Date(now.getTime() + (14 * 24 * 60 * 60 * 1000));
         
         const mosqueData = {
             name: mosqueName, 
@@ -102,18 +131,16 @@ router.post('/mosques/register', async (req, res) => {
             zipcode: zipcode || null,
             phone: phone || null,
             website: website || null,
-            // ✅ FIXED: Properly initialize trial from the start
             subscription_status: 'trialing',
             plan_type: 'trial',
             trial_started_at: now.toISOString(),
             trial_ends_at: trialEnd.toISOString(),
             max_students: 10,
             max_teachers: 2,
-            m365_configured: false, // ✅ Default M365 to false
+            m365_configured: false,
             created_at: now.toISOString()
         };
 
-        // Als er een apart contact email is opgegeven, gebruik dat
         if (contactEmail && contactEmail.trim() && contactEmail.trim() !== normalizedAdminEmail) {
             mosqueData.email = contactEmail.trim().toLowerCase();
         }
@@ -167,62 +194,76 @@ router.post('/mosques/register', async (req, res) => {
 
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
-        // ✅ PAYMENT LINKING (keep existing code)
+        // ✅ PAYMENT LINKING met lazy loading
         let paymentLinked = false;
         try {
           console.log(`🔗 [Registration] Attempting payment linking for mosque ${newMosque.id}...`);
           
-          const linkingResult = await linkPendingPaymentAfterRegistration({
-            mosqueId: newMosque.id,
-            adminEmail: normalizedAdminEmail
-          });
-          
-          if (linkingResult.success) {
-            console.log(`✅ [Registration] Payment linked successfully! Subscription: ${linkingResult.subscriptionId}`);
-            paymentLinked = true;
+          const paymentService = getPaymentLinkingService();
+          if (paymentService.linkPendingPaymentAfterRegistration) {
+            const linkingResult = await paymentService.linkPendingPaymentAfterRegistration({
+              mosqueId: newMosque.id,
+              adminEmail: normalizedAdminEmail
+            });
             
-            // Update newMosque object met nieuwe status voor response
-            newMosque.subscription_status = 'active';
-            newMosque.stripe_customer_id = linkingResult.stripeCustomerId;
-            newMosque.stripe_subscription_id = linkingResult.subscriptionId;
+            if (linkingResult.success) {
+              console.log(`✅ [Registration] Payment linked successfully! Subscription: ${linkingResult.subscriptionId}`);
+              paymentLinked = true;
+              
+              newMosque.subscription_status = 'active';
+              newMosque.stripe_customer_id = linkingResult.stripeCustomerId;
+              newMosque.stripe_subscription_id = linkingResult.subscriptionId;
+            } else {
+              console.log(`ℹ️ [Registration] No pending payment found - normal for free registrations`);
+            }
           } else {
-            console.log(`ℹ️ [Registration] No pending payment found - normal for free registrations`);
+            console.warn('[Registration] Payment linking service not available');
           }
         } catch (linkingError) {
           console.error('[Registration] Payment linking failed (non-fatal):', linkingError);
         }
         
-        // ✅ FIXED: Welcome email with better error handling
+        // ✅ WELCOME EMAIL met lazy loading en betere error handling
+        let welcomeEmailSent = false;
         try {
           console.log(`📧 [Registration] Sending welcome email to ${normalizedAdminEmail}...`);
           
-          const welcomeEmailData = {
-            mosque: {
-              id: newMosque.id,
-              name: newMosque.name,
-              subdomain: newMosque.subdomain,
-              email: newMosque.email,
-              address: newMosque.address,
-              city: newMosque.city,
-              zipcode: newMosque.zipcode,
-              phone: newMosque.phone,
-              website: newMosque.website,
-              m365_configured: newMosque.m365_configured || false
-            },
-            admin: {
-              id: newAppAdmin.id,
-              name: adminName,
-              email: normalizedAdminEmail,
-              role: 'admin'
-            }
-          };
-
-          const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
+          const emailService = getRegistrationEmailService();
+          console.log(`Email service type check: ${typeof emailService.sendRegistrationWelcomeEmail}`);
           
-          if (emailResult.success) {
-            console.log(`✅ [Registration] Welcome email sent successfully to ${normalizedAdminEmail} via ${emailResult.service}`);
+          if (emailService.sendRegistrationWelcomeEmail && typeof emailService.sendRegistrationWelcomeEmail === 'function') {
+            const welcomeEmailData = {
+              mosque: {
+                id: newMosque.id,
+                name: newMosque.name,
+                subdomain: newMosque.subdomain,
+                email: newMosque.email,
+                address: newMosque.address,
+                city: newMosque.city,
+                zipcode: newMosque.zipcode,
+                phone: newMosque.phone,
+                website: newMosque.website,
+                m365_configured: newMosque.m365_configured || false
+              },
+              admin: {
+                id: newAppAdmin.id,
+                name: adminName,
+                email: normalizedAdminEmail,
+                role: 'admin'
+              }
+            };
+
+            const emailResult = await emailService.sendRegistrationWelcomeEmail(welcomeEmailData);
+            
+            if (emailResult && emailResult.success) {
+              console.log(`✅ [Registration] Welcome email sent successfully to ${normalizedAdminEmail} via ${emailResult.service}`);
+              welcomeEmailSent = true;
+            } else {
+              console.warn(`⚠️ [Registration] Welcome email failed for ${normalizedAdminEmail}:`, emailResult ? emailResult.error : 'Unknown error');
+            }
           } else {
-            console.warn(`⚠️ [Registration] Welcome email failed for ${normalizedAdminEmail}:`, emailResult.error);
+            console.error(`❌ [Registration] sendRegistrationWelcomeEmail is not a function! Type: ${typeof emailService.sendRegistrationWelcomeEmail}`);
+            console.log('Available methods in emailService:', Object.keys(emailService));
           }
         } catch (emailError) {
           console.error(`❌ [Registration] Error sending welcome email to ${normalizedAdminEmail}:`, emailError);
@@ -239,14 +280,14 @@ router.post('/mosques/register', async (req, res) => {
           message: successMessage, 
           mosque: newMosque, 
           admin: newAppAdmin,
-          welcome_email_sent: true,
+          welcome_email_sent: welcomeEmailSent,
           payment_linked: paymentLinked,
           subscription_status: newMosque.subscription_status,
-          trial_ends_at: newMosque.trial_ends_at // ✅ Include trial end date
+          trial_ends_at: newMosque.trial_ends_at
         });
 
     } catch (error) {
-        // ✅ ROLLBACK code (keep existing)
+        // Rollback code
         console.error("!!! REGISTRATION ERROR - STARTING ROLLBACK !!!");
         console.error("Error details:", {
           message: error.message,
@@ -301,120 +342,7 @@ router.post('/mosques/register', async (req, res) => {
   }
 });
 
-// ✅ PAYMENT LINKING FUNCTION (keep existing)
-const linkPendingPaymentAfterRegistration = async ({ mosqueId, adminEmail }) => {
-  try {
-    console.log(`[Payment Linking] Searching for pending payments for ${adminEmail}`);
-    
-    const sixtyMinutesAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    
-    let pendingPayment = null;
-    
-    // Strategy 1: Match on customer_email
-    try {
-      const { data: emailMatches, error: emailError } = await supabase
-        .from('pending_payments')
-        .select('*')
-        .eq('customer_email', adminEmail)
-        .eq('status', 'pending')
-        .gte('created_at', sixtyMinutesAgo)
-        .order('created_at', { ascending: false });
-      
-      if (!emailError && emailMatches && emailMatches.length > 0) {
-        pendingPayment = emailMatches[0];
-        console.log(`[Payment Linking] ✅ Found payment by EMAIL: ${pendingPayment.tracking_id}`);
-      }
-    } catch (error) {
-      console.warn('[Payment Linking] Email strategy failed:', error.message);
-    }
-    
-    // Strategy 2: Fallback - Match on timing
-    if (!pendingPayment) {
-      try {
-        console.log(`[Payment Linking] No email match found, trying timing-based matching...`);
-        
-        const { data: recentPayments, error: recentError } = await supabase
-          .from('pending_payments')
-          .select('*')
-          .eq('status', 'pending')
-          .is('mosque_id', null)
-          .gte('created_at', sixtyMinutesAgo)
-          .order('created_at', { ascending: false });
-        
-        if (!recentError && recentPayments && recentPayments.length > 0) {
-          if (recentPayments.length === 1) {
-            pendingPayment = recentPayments[0];
-            console.log(`[Payment Linking] ✅ Found payment by TIMING (single recent): ${pendingPayment.tracking_id}`);
-          } else {
-            pendingPayment = recentPayments[0];
-            console.log(`[Payment Linking] ⚠️ Found payment by TIMING (multiple, taking most recent): ${pendingPayment.tracking_id}`);
-          }
-        }
-      } catch (error) {
-        console.warn('[Payment Linking] Timing strategy failed:', error.message);
-      }
-    }
-    
-    if (!pendingPayment) {
-      console.log(`[Payment Linking] No timing match found either`);
-    }
-    
-    if (!pendingPayment) {
-      console.log(`[Payment Linking] No pending payments found for ${adminEmail} using any strategy`);
-      return { success: false, reason: 'no_pending_payments' };
-    }
-    
-    console.log(`[Payment Linking] Found pending payment: ${pendingPayment.tracking_id} (${pendingPayment.stripe_subscription_id})`);
-    
-    // Update pending payment with mosque_id
-    const { error: updateError } = await supabase
-      .from('pending_payments')
-      .update({ 
-        mosque_id: mosqueId,
-        status: 'linked',
-        customer_email: pendingPayment.customer_email || adminEmail,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', pendingPayment.id);
-    
-    if (updateError) {
-      throw new Error(`Failed to update pending payment: ${updateError.message}`);
-    }
-    
-    // Update mosque with Stripe info
-    const { error: mosqueUpdateError } = await supabase
-      .from('mosques')
-      .update({
-        stripe_customer_id: pendingPayment.stripe_customer_id,
-        stripe_subscription_id: pendingPayment.stripe_subscription_id,
-        subscription_status: 'active',
-        trial_ends_at: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', mosqueId);
-    
-    if (mosqueUpdateError) {
-      throw new Error(`Failed to update mosque: ${mosqueUpdateError.message}`);
-    }
-    
-    console.log(`✅ [Payment Linking] Successfully linked payment to mosque ${mosqueId} - Status now ACTIVE`);
-    
-    return { 
-      success: true, 
-      paymentId: pendingPayment.id,
-      subscriptionId: pendingPayment.stripe_subscription_id,
-      stripeCustomerId: pendingPayment.stripe_customer_id,
-      amount: pendingPayment.amount,
-      strategy: pendingPayment.customer_email ? 'email_match' : 'timing_match'
-    };
-    
-  } catch (error) {
-    console.error('[Payment Linking] Error:', error);
-    return { success: false, error: error.message };
-  }
-};
-
-// ✅ Keep all existing test routes
+// Test routes (met lazy loading)
 router.post('/mosques/check-email', async (req, res) => {
   try {
     const { email } = req.body;
@@ -498,119 +426,34 @@ router.post('/mosques/test-welcome-email', async (req, res) => {
       }
     };
 
-    const emailResult = await sendRegistrationWelcomeEmail(welcomeEmailData);
-    
-    if (emailResult.success) {
-      res.json({ 
-        success: true, 
-        message: `Test welkomstmail verstuurd naar ${welcomeEmailData.admin.email} via ${emailResult.service}`,
-        service: emailResult.service,
-        messageId: emailResult.messageId
-      });
+    const emailService = getRegistrationEmailService();
+    if (emailService.sendRegistrationWelcomeEmail) {
+      const emailResult = await emailService.sendRegistrationWelcomeEmail(welcomeEmailData);
+      
+      if (emailResult.success) {
+        res.json({ 
+          success: true, 
+          message: `Test welkomstmail verstuurd naar ${welcomeEmailData.admin.email} via ${emailResult.service}`,
+          service: emailResult.service,
+          messageId: emailResult.messageId
+        });
+      } else {
+        res.json({ 
+          success: false, 
+          message: `Welkomstmail versturen mislukt: ${emailResult.error}`,
+          service: emailResult.service
+        });
+      }
     } else {
-      res.json({ 
-        success: false, 
-        message: `Welkomstmail versturen mislukt: ${emailResult.error}`,
-        service: emailResult.service
+      res.json({
+        success: false,
+        message: 'Email service niet beschikbaar'
       });
     }
 
   } catch (error) {
     console.error('Error testing welcome email:', error);
     sendError(res, 500, 'Fout bij testen welkomstmail.', error.message, req);
-  }
-});
-
-router.post('/test-resend-email', async (req, res) => {
-  try {
-    const { sendTestEmail } = require('../services/emailService');
-    const { testEmail } = req.body;
-    
-    if (!testEmail) {
-      return sendError(res, 400, 'Test email adres is verplicht.', null, req);
-    }
-
-    console.log(`🧪 [TEST] Testing Resend with email: ${testEmail}`);
-    const result = await sendTestEmail(testEmail);
-    
-    if (result.success) {
-      res.json({ 
-        success: true, 
-        message: `Test email succesvol verstuurd naar ${testEmail}`,
-        messageId: result.messageId,
-        service: result.service
-      });
-    } else {
-      res.json({ 
-        success: false, 
-        message: `Test email mislukt: ${result.error}`,
-        service: result.service
-      });
-    }
-
-  } catch (error) {
-    console.error('Error testing Resend email:', error);
-    sendError(res, 500, 'Fout bij testen email service.', error.message, req);
-  }
-});
-
-router.post('/debug-resend-direct', async (req, res) => {
-    try {
-        const { Resend } = require('resend');
-        const resend = new Resend(process.env.RESEND_API_KEY);
-        
-        const result = await resend.emails.send({
-            from: 'test@onboarding.resend.dev',
-            to: 'i.abdellaoui@gmail.com',
-            subject: 'Backend Direct Test',
-            html: '<p>Direct test!</p>'
-        });
-        
-        res.json({ success: true, result });
-    } catch (error) {
-        console.error('Direct Error:', error);
-        res.json({ 
-            success: false, 
-            error: error.message,
-            fullError: error.toString()
-        });
-    }
-});
-
-router.post('/test-payment-linking', async (req, res) => {
-  try {
-    const { mosqueId, adminEmail } = req.body;
-    
-    if (!mosqueId || !adminEmail) {
-      return sendError(res, 400, 'Moskee ID en admin email zijn verplicht.', null, req);
-    }
-
-    console.log(`🧪 [TEST] Testing payment linking for mosque: ${mosqueId}, email: ${adminEmail}`);
-    
-    const result = await linkPendingPaymentAfterRegistration({
-      mosqueId: mosqueId,
-      adminEmail: adminEmail
-    });
-    
-    if (result.success) {
-      res.json({ 
-        success: true, 
-        message: `Payment linking succesvol voor mosque ${mosqueId}`,
-        paymentId: result.paymentId,
-        subscriptionId: result.subscriptionId,
-        amount: result.amount
-      });
-    } else {
-      res.json({ 
-        success: false, 
-        message: `Payment linking mislukt: ${result.error || result.reason}`,
-        reason: result.reason
-      });
-    }
-
-  } catch (error) {
-    console.error('Error testing payment linking:', error);
-    sendError(res, 500, 'Fout bij testen payment linking.', error.message, req);
   }
 });
 
