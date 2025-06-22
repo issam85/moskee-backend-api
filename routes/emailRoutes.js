@@ -19,7 +19,7 @@ router.post('/send-generic', async (req, res) => {
         const emailBodyHtml = `
             <p>U heeft een bericht ontvangen van <strong>${sender.name}</strong> (${sender.email}) via het MijnLVS portaal.</p>
             <hr><div style="margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div><hr>
-            <p style="font-size: small; color: grey;">U kunt direct op deze e-mail reageren.</p>`;
+            <p style="font-size: small; color: grey;">Log in op het portaal van MijnLVS om te reageren op de mail.</p>`;
         
         // ✅ UPDATED: Gebruik intelligente sendEmail functie
         const emailDetails = {
@@ -137,7 +137,7 @@ router.post('/send-to-class', async (req, res) => {
                 
                 <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
                     <p style="color: #6b7280; margin: 0; font-size: 14px;">
-                        Dit bericht is verstuurd via MijnLVS. U kunt direct op deze email reageren om contact op te nemen met de leraar.
+                        Dit bericht is verstuurd via MijnLVS. Log in op het ouderportaal van MijnLVS om de leraar een bericht te sturen.
                     </p>
                 </div>
             </div>
@@ -239,7 +239,7 @@ router.post('/send-to-parent', async (req, res) => {
                 
                 <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
                     <p style="color: #6b7280; margin: 0; font-size: 14px;">
-                        Dit bericht is verstuurd via MijnLVS. U kunt direct op deze email reageren.
+                        Dit bericht is verstuurd via MijnLVS. Log in op het portaal van MijnLVS om te reageren op de mail.
                     </p>
                 </div>
             </div>
