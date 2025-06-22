@@ -1,9 +1,10 @@
-// routes/userRoutes.js - V3.2 - Met intelligente email routing
+// routes/userRoutes.js - V3.3 - Met teacher limiet controle
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
-// ✅ UPDATED: Importeer de master sendEmail functie
 const { sendEmail } = require('../services/emailService');
+// ✅ STEP 1: Import the checkUsageLimit function
+const { checkUsageLimit } = require('../services/trialService');
 
 // Helper functie om een willekeurig wachtwoord te genereren.
 const generateTempPassword = () => {
@@ -44,7 +45,7 @@ router.get('/:id', async (req, res) => {
     }
 });
 
-// ✅ UPDATED: POST (create) a new user met intelligente email routing
+// ✅ FIXED: POST (create) a new user with teacher limit check
 router.post('/', async (req, res) => {
     if (req.user.role !== 'admin') return sendError(res, 403, "Niet geautoriseerd.", null, req);
     
@@ -53,6 +54,27 @@ router.post('/', async (req, res) => {
 
         if (req.user.mosque_id !== mosque_id) return sendError(res, 403, "U kunt alleen gebruikers toevoegen aan uw eigen moskee.", null, req);
         if (!email || !name || !role) return sendError(res, 400, "Email, naam en rol zijn verplicht.", null, req);
+
+        // ==========================================================
+        // ✅ STEP 2: ADD TEACHER LIMIT CHECK HERE
+        // ==========================================================
+        if (role === 'teacher') {
+            console.log(`🔍 [userRoutes] Checking teacher limit for mosque ${mosque_id}...`);
+            const limitCheck = await checkUsageLimit(mosque_id, 'teachers');
+            
+            if (!limitCheck.allowed) {
+                console.log(`❌ [userRoutes] Teacher limit reached: ${limitCheck.message}`);
+                return sendError(res, 403, limitCheck.message || 'Limiet voor leraren bereikt.', { 
+                    code: 'TEACHER_LIMIT_REACHED',
+                    currentCount: limitCheck.currentCount,
+                    maxAllowed: limitCheck.maxAllowed 
+                }, req);
+            }
+            console.log(`✅ [userRoutes] Teacher limit check passed: ${limitCheck.currentCount}/${limitCheck.maxAllowed}`);
+        }
+        // ==========================================================
+        // END OF THE FIX
+        // ==========================================================
 
         // 1. Genereer hier een veilig, tijdelijk wachtwoord
         const tempPassword = generateTempPassword();
@@ -94,7 +116,7 @@ router.post('/', async (req, res) => {
 
         console.log(`✅ [userRoutes] New ${role} created: ${name} (${normalizedEmail})`);
 
-        // 4. ✅ UPDATED: Stuur welkomstmail via intelligente routing
+        // 4. Stuur welkomstmail via intelligente routing
         if (sendWelcomeEmail) {
             console.log(`📧 [userRoutes] Attempting to send welcome email to ${normalizedEmail}...`);
             try {
@@ -116,6 +138,8 @@ router.post('/', async (req, res) => {
         sendError(res, isDuplicateError ? 409 : 500, error.message, error, req);
     }
 });
+
+// ... (rest of your routes remain the same)
 
 // PUT (update) a user
 router.put('/:id', async (req, res) => {
@@ -178,7 +202,7 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
-// ✅ UPDATED: POST send a new password to a user met intelligente routing
+// POST send a new password to a user met intelligente routing
 router.post('/:userId/send-new-password', async (req, res) => {
     if (req.user.role !== 'admin') return sendError(res, 403, "Niet geautoriseerd.", null, req);
     const { userId } = req.params;
@@ -196,7 +220,6 @@ router.post('/:userId/send-new-password', async (req, res) => {
 
         console.log(`🔄 [userRoutes] Sending new password email to ${user.email}...`);
 
-        // ✅ Gebruik de intelligente sendEmail functie
         try {
             const { data: mosque } = await supabase.from('mosques').select('name, subdomain').eq('id', user.mosque_id).single();
             
@@ -238,12 +261,11 @@ router.post('/:userId/send-new-password', async (req, res) => {
     }
 });
 
-// ✅ COMPLETELY REWRITTEN: Helper voor welkomstmail met intelligente routing
+// Helper functie voor welkomstmail met intelligente routing
 async function sendWelcomeEmailForNewUser(appUser, plainTextPassword) {
     try {
         console.log(`📧 [userRoutes] Preparing welcome email for ${appUser.email} (${appUser.role})`);
 
-        // Haal moskee gegevens op
         const { data: mosque, error: mosqueError } = await supabase
             .from('mosques')
             .select('name, subdomain')
@@ -255,18 +277,16 @@ async function sendWelcomeEmailForNewUser(appUser, plainTextPassword) {
             return;
         }
 
-        // Stel email details samen
         const emailDetails = {
             to: appUser.email,
             subject: `Welkom bij ${mosque.name}! Uw ${appUser.role === 'teacher' ? 'leraar' : 'ouder'} account is aangemaakt`,
             body: generateWelcomeEmailHTML(appUser, plainTextPassword, mosque),
             mosqueId: appUser.mosque_id,
-            emailType: `welcome_${appUser.role}` // welcome_teacher of welcome_parent
+            emailType: `welcome_${appUser.role}`
         };
 
         console.log(`[userRoutes] Attempting to send welcome email via intelligent routing...`);
         
-        // ✅ Gebruik de master sendEmail functie (zal M365 proberen, dan fallback naar Resend)
         const emailResult = await sendEmail(emailDetails);
         
         if (emailResult.success) {
@@ -283,7 +303,7 @@ async function sendWelcomeEmailForNewUser(appUser, plainTextPassword) {
     }
 }
 
-// ✅ NEW: HTML template voor welkomstmail nieuwe gebruiker
+// HTML template functie voor welkomstmail nieuwe gebruiker
 function generateWelcomeEmailHTML(user, tempPassword, mosque) {
     const roleText = user.role === 'teacher' ? 'leraar' : 'ouder';
     const loginUrl = `https://${mosque.subdomain}.mijnlvs.nl`;
@@ -359,7 +379,6 @@ function generateWelcomeEmailHTML(user, tempPassword, mosque) {
     `;
 }
 
-// ✅ NEW: Teacher-specific content
 function generateTeacherSpecificContent() {
     return `
         <!-- Teacher Features -->
@@ -376,7 +395,6 @@ function generateTeacherSpecificContent() {
     `;
 }
 
-// ✅ NEW: Parent-specific content
 function generateParentSpecificContent() {
     return `
         <!-- Parent Features -->
@@ -393,7 +411,6 @@ function generateParentSpecificContent() {
     `;
 }
 
-// ✅ NEW: HTML template voor nieuw wachtwoord email
 function generateNewPasswordEmailHTML(userName, newPassword, subdomain) {
     const loginUrl = `https://${subdomain}.mijnlvs.nl`;
     
