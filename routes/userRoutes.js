@@ -446,7 +446,7 @@ function generateNewPasswordEmailHTML(userName, newPassword, subdomain) {
             </p>
             
             <p style="color: #374151;">
-                Barakallahu feeki,<br>
+                Barakallahu feek,<br>
                 Het MijnLVS Team
             </p>
         </div>
