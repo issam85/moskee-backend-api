@@ -238,7 +238,7 @@ const generateWelcomeEmailHTML = (mosque, admin) => {
             <!-- Footer -->
             <div style="text-align: center; color: #6b7280;">
                 <p style="margin: 0;">
-                    Barakallahu feeki,<br>
+                    Barakallahu feek,<br>
                     <strong style="color: #374151;">Het MijnLVS Team</strong>
                 </p>
                 <p style="margin: 20px 0 0 0; font-size: 12px;">
