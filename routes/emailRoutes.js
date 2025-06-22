@@ -5,8 +5,15 @@ const { supabase } = require('../config/database');
 const { sendEmail } = require('../services/emailService');
 const { sendError } = require('../utils/errorHelper');
 const axios = require('axios');
+const {
+    generateParentToTeacherEmail,
+    generateTeacherToParentEmail,
+    generateTeacherToClassEmail,
+    generateGenericEmail
+} = require('../services/emailTemplates');
 
 // POST send a generic email from logged-in user to any recipient
+// ✅ FIXED: POST send a generic email met mooie template
 router.post('/send-generic', async (req, res) => {
     const sender = req.user;
     const { recipientEmail, subject, body } = req.body;
@@ -16,12 +23,76 @@ router.post('/send-generic', async (req, res) => {
     }
     
     try {
-        const emailBodyHtml = `
-            <p>U heeft een bericht ontvangen van <strong>${sender.name}</strong> (${sender.email}) via het MijnLVS portaal.</p>
-            <hr><div style="margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div><hr>
-            <p style="font-size: small; color: grey;">Log in op het portaal van MijnLVS om te reageren op de mail.</p>`;
+        console.log(`📧 [EmailRoutes] Generic email from ${sender.name} to ${recipientEmail}`);
+
+        // Haal ontvanger info op (als het een gebruiker in het systeem is)
+        let recipientInfo = { name: recipientEmail, email: recipientEmail, role: 'Onbekend' };
         
-        // ✅ UPDATED: Gebruik intelligente sendEmail functie
+        try {
+            const { data: recipient } = await supabase
+                .from('users')
+                .select('name, email, role')
+                .eq('email', recipientEmail.toLowerCase())
+                .single();
+            
+            if (recipient) {
+                recipientInfo = recipient;
+            }
+        } catch (lookupError) {
+            console.log(`[EmailRoutes] Recipient ${recipientEmail} not found in system, using email as name`);
+        }
+
+        // Bepaal email context gebaseerd op rollen
+        let emailContext = 'algemeen';
+        if (sender.role === 'admin') emailContext = 'admin';
+        if (sender.role === 'parent' && recipientInfo.role === 'teacher') emailContext = 'parent_to_teacher';
+        if (sender.role === 'teacher' && recipientInfo.role === 'parent') emailContext = 'teacher_to_parent';
+
+        // ✅ FIXED: ALLEEN de template logica - geen hardcoded HTML meer!
+        let emailBodyHtml;
+        if (emailContext === 'parent_to_teacher') {
+            // Probeer studentInfo te vinden voor betere personalisatie
+            let studentInfo = null;
+            try {
+                const { data: student } = await supabase
+                    .from('students')
+                    .select('name')
+                    .eq('parent_id', sender.id)
+                    .eq('active', true)
+                    .single();
+                
+                if (student) {
+                    studentInfo = { name: student.name };
+                }
+            } catch (studentError) {
+                // Geen probleem als student niet gevonden - email werkt zonder
+                console.log(`[EmailRoutes] No student found for parent ${sender.name}`);
+            }
+
+            emailBodyHtml = generateParentToTeacherEmail(
+                { name: sender.name, email: sender.email, role: sender.role },
+                recipientInfo,
+                subject,
+                body,
+                studentInfo
+            );
+        } else if (emailContext === 'teacher_to_parent') {
+            emailBodyHtml = generateTeacherToParentEmail(
+                { name: sender.name, email: sender.email, role: sender.role },
+                recipientInfo,
+                subject,
+                body
+            );
+        } else {
+            emailBodyHtml = generateGenericEmail(
+                { name: sender.name, email: sender.email, role: sender.role },
+                recipientInfo,
+                subject,
+                body,
+                emailContext
+            );
+        }
+        
         const emailDetails = {
             to: recipientEmail,
             subject: subject,
@@ -33,9 +104,10 @@ router.post('/send-generic', async (req, res) => {
         const emailResult = await sendEmail(emailDetails);
         
         if (emailResult.success) {
+            console.log(`✅ [EmailRoutes] Generic email sent via ${emailResult.service}`);
             res.json({ 
                 success: true, 
-                message: `Email succesvol verstuurd naar ${recipientEmail} via ${emailResult.service}.`,
+                message: `Email succesvol verstuurd naar ${recipientInfo.name || recipientEmail} via ${emailResult.service}.`,
                 service: emailResult.service
             });
         } else {
@@ -46,7 +118,7 @@ router.post('/send-generic', async (req, res) => {
     }
 });
 
-// ✅ COMPLETELY FIXED: POST send an email from a teacher to a whole class
+// ✅ FIXED: POST send an email from a teacher to a whole class - using new templates
 router.post('/send-to-class', async (req, res) => {
     if (req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
 
@@ -66,16 +138,12 @@ router.post('/send-to-class', async (req, res) => {
 
         console.log(`✅ [EmailRoutes] Class validation passed: ${classInfo.name}`);
 
-        // ==========================================================
-        // ✅ FIXED: REPLACE RPC CALL WITH DIRECT QUERIES
-        // ==========================================================
-
         // Stap 2: Haal alle studenten op die in deze klas zitten
         const { data: studentsInClass, error: studentsError } = await supabase
             .from('students')
             .select('parent_id')
             .eq('class_id', classId)
-            .eq('active', true); // Alleen emails sturen voor actieve studenten
+            .eq('active', true);
 
         if (studentsError) {
             console.error('[EmailRoutes] Error fetching students:', studentsError);
@@ -88,8 +156,7 @@ router.post('/send-to-class', async (req, res) => {
             return sendError(res, 404, "Geen actieve leerlingen (en dus geen ouders) gevonden voor deze klas.", null, req);
         }
 
-        // Stap 3: Verzamel alle unieke parent_id's uit de lijst van studenten
-        // De .filter(Boolean) verwijdert eventuele 'null' of 'undefined' parent_id's
+        // Stap 3: Verzamel alle unieke parent_id's
         const parentIds = [...new Set(studentsInClass.map(s => s.parent_id).filter(Boolean))];
 
         console.log(`👨‍👩‍👧‍👦 [EmailRoutes] Found ${parentIds.length} unique parent IDs`);
@@ -103,7 +170,7 @@ router.post('/send-to-class', async (req, res) => {
             .from('users')
             .select('id, name, email')
             .in('id', parentIds)
-            .eq('role', 'parent'); // Extra veiligheidscheck
+            .eq('role', 'parent');
 
         if (parentsError) {
             console.error('[EmailRoutes] Error fetching parent details:', parentsError);
@@ -116,38 +183,20 @@ router.post('/send-to-class', async (req, res) => {
             return sendError(res, 404, "Kon de e-mailadressen van de ouders niet vinden in de gebruikersdatabase.", null, req);
         }
 
-        // ==========================================================
-        // END OF FIX - REST OF CODE REMAINS THE SAME
-        // ==========================================================
-
-        // Maak de email content
-        const emailBodyHtml = `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-                <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <h2 style="color: #15803d; margin-top: 0;">Bericht van leraar ${sender.name}</h2>
-                    <p style="color: #166534; margin: 0;">Voor klas: <strong>${classInfo.name}</strong></p>
-                </div>
-                
-                <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <h3 style="color: #374151; margin-top: 0;">📝 Onderwerp: ${subject}</h3>
-                    <div style="color: #4b5563; line-height: 1.6; margin: 16px 0;">
-                        ${body.replace(/\n/g, '<br>')}
-                    </div>
-                </div>
-                
-                <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
-                    <p style="color: #6b7280; margin: 0; font-size: 14px;">
-                        Dit bericht is verstuurd via MijnLVS. Log in op het ouderportaal van MijnLVS om de leraar een bericht te sturen.
-                    </p>
-                </div>
-            </div>
-        `;
-
         console.log(`📤 [EmailRoutes] Preparing to send emails to ${parents.length} parents...`);
 
-        // ✅ UPDATED: Gebruik intelligente sendEmail functie voor elk ouder
+        // ✅ FIXED: Gebruik intelligente sendEmail functie met nieuwe template voor elk ouder
         const emailPromises = parents.map(parent => {
             console.log(`📧 [EmailRoutes] Queueing email for parent: ${parent.name} (${parent.email})`);
+            
+            // ✅ Use the new beautiful template
+            const emailBodyHtml = generateTeacherToClassEmail(
+                { name: sender.name, email: sender.email, role: sender.role },
+                classInfo,
+                subject,
+                body,
+                parent.name // Pass parent name for personalization
+            );
             
             return sendEmail({
                 to: parent.email,
@@ -194,7 +243,7 @@ router.post('/send-to-class', async (req, res) => {
     }
 });
 
-// ✅ UPDATED: POST send email to a specific parent
+// ✅ FIXED: POST send email to a specific parent - using new templates
 router.post('/send-to-parent', async (req, res) => {
     if (!req.user || req.user.role !== 'teacher') {
         return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
@@ -208,6 +257,7 @@ router.post('/send-to-parent', async (req, res) => {
     }
     
     try {
+        // Haal ontvanger info op
         const { data: recipient, error: userError } = await supabase
             .from('users')
             .select('id, email, name, mosque_id, role')
@@ -222,28 +272,32 @@ router.post('/send-to-parent', async (req, res) => {
             return sendError(res, 400, "U kunt alleen emails sturen naar ouders.", null, req);
         }
 
-        const emailBodyHtml = `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-                <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <h2 style="color: #15803d; margin-top: 0;">Persoonlijk bericht van leraar</h2>
-                    <p style="color: #166534; margin: 0;">Van: <strong>${sender.name}</strong></p>
-                    <p style="color: #166534; margin: 0;">Aan: <strong>${recipient.name}</strong></p>
-                </div>
-                
-                <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <h3 style="color: #374151; margin-top: 0;">📝 ${subject}</h3>
-                    <div style="color: #4b5563; line-height: 1.6; margin: 16px 0;">
-                        ${body.replace(/\n/g, '<br>')}
-                    </div>
-                </div>
-                
-                <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
-                    <p style="color: #6b7280; margin: 0; font-size: 14px;">
-                        Dit bericht is verstuurd via MijnLVS. Log in op het portaal van MijnLVS om te reageren op de mail.
-                    </p>
-                </div>
-            </div>
-        `;
+        // ✅ OPTIONAL: Try to get student info for better personalization
+        let studentInfo = null;
+        try {
+            const { data: student } = await supabase
+                .from('students')
+                .select('name')
+                .eq('parent_id', recipient.id)
+                .eq('active', true)
+                .single();
+            
+            if (student) {
+                studentInfo = { name: student.name };
+            }
+        } catch (studentError) {
+            // No problem if student not found - email will work without it
+            console.log(`[EmailRoutes] No student found for parent ${recipient.name}`);
+        }
+
+        // ✅ Use the new beautiful template
+        const emailBodyHtml = generateTeacherToParentEmail(
+            { name: sender.name, email: sender.email, role: sender.role },
+            { name: recipient.name, email: recipient.email, role: recipient.role },
+            subject,
+            body,
+            studentInfo // This will be null if no student found, which is fine
+        );
         
         const emailDetails = {
             to: recipient.email,
