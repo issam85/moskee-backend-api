@@ -1,4 +1,4 @@
-// services/registrationEmailService.js - UPDATED voor transactional email service
+// services/registrationEmailService.js - FIXED met proper exports
 const { sendEmail } = require('./emailService');
 
 // Verstuur welkomstmail voor nieuwe moskee registratie
@@ -286,4 +286,11 @@ const generateReminderEmailHTML = (mosque, admin) => {
             </p>
         </div>
     `;
+};
+
+// ✅ CRITICAL: Export all functions
+module.exports = {
+    sendRegistrationWelcomeEmail,
+    sendGettingStartedReminder,
+    testWelcomeEmail
 };
