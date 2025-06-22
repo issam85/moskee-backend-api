@@ -3,67 +3,7 @@ const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
 const { sendM365EmailInternal } = require('../services/emailService');
-
-// ✅ FIXED: Better import with fallback for registrationEmailService
-let sendRegistrationWelcomeEmail;
-try {
-    const { sendRegistrationWelcomeEmail: importedFunction } = require('../services/registrationEmailService');
-    sendRegistrationWelcomeEmail = importedFunction;
-    console.log('✅ [AuthRoutes] Successfully imported registrationEmailService');
-} catch (error) {
-    console.warn('⚠️ [AuthRoutes] registrationEmailService not found, using fallback');
-    
-    // ✅ ENHANCED FALLBACK: Complete welcome email function
-    sendRegistrationWelcomeEmail = async (welcomeEmailData) => {
-        try {
-            const { mosque, admin } = welcomeEmailData;
-            console.log(`[AuthRoutes] Sending fallback welcome email to ${admin.email}`);
-            
-            // Try M365 first if configured
-            if (mosque.m365_configured) {
-                console.log(`[AuthRoutes] Using M365 for ${mosque.name}`);
-                const result = await sendM365EmailInternal(
-                    mosque,
-                    admin.email,
-                    `Welkom bij MijnLVS - ${mosque.name}`,
-                    `
-                    <h2>Welkom ${admin.name}!</h2>
-                    <p>Uw MijnLVS account voor <strong>${mosque.name}</strong> is succesvol aangemaakt.</p>
-                    <p><strong>Inloggegevens:</strong></p>
-                    <ul>
-                        <li>Website: <a href="https://${mosque.subdomain}.mijnlvs.nl">https://${mosque.subdomain}.mijnlvs.nl</a></li>
-                        <li>Email: ${admin.email}</li>
-                    </ul>
-                    <p>Uw 14-dagen proefperiode is gestart. U kunt nu inloggen en uw leraren en leerlingen toevoegen.</p>
-                    <p><strong>Trial limieten:</strong></p>
-                    <ul>
-                        <li>Maximaal 10 leerlingen</li>
-                        <li>Maximaal 2 leraren</li>
-                    </ul>
-                    <br>
-                    <p>Met vriendelijke groet,<br>Het MijnLVS Team</p>
-                    `
-                );
-                
-                return result.success ? 
-                    { success: true, service: 'M365', messageId: result.messageId } :
-                    { success: false, service: 'M365', error: result.error };
-            }
-            
-            // If M365 not configured, log but don't fail registration
-            console.log(`[AuthRoutes] M365 not configured for ${mosque.name}, skipping welcome email`);
-            return { 
-                success: true, 
-                service: 'skipped', 
-                message: 'M365 not configured, welcome email skipped' 
-            };
-            
-        } catch (error) {
-            console.error('[AuthRoutes] Fallback welcome email error:', error);
-            return { success: false, service: 'fallback', error: error.message };
-        }
-    };
-}
+const { sendRegistrationWelcomeEmail } = require('../services/registrationEmailService');
 
 // POST /api/auth/login
 router.post('/auth/login', async (req, res) => {
