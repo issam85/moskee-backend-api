@@ -1,7 +1,8 @@
-// routes/emailRoutes.js - Extended version
+// routes/emailRoutes.js - Fixed version zonder RPC dependency
 const router = require('express').Router();
 const { supabase } = require('../config/database');
-const { sendM365EmailInternal } = require('../services/emailService');
+// ✅ UPDATED: Gebruik de intelligente sendEmail functie
+const { sendEmail } = require('../services/emailService');
 const { sendError } = require('../utils/errorHelper');
 const axios = require('axios');
 
@@ -20,16 +21,23 @@ router.post('/send-generic', async (req, res) => {
             <hr><div style="margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div><hr>
             <p style="font-size: small; color: grey;">U kunt direct op deze e-mail reageren.</p>`;
         
-        const emailResult = await sendM365EmailInternal({
+        // ✅ UPDATED: Gebruik intelligente sendEmail functie
+        const emailDetails = {
             to: recipientEmail,
             subject: subject,
             body: emailBodyHtml,
             mosqueId: sender.mosque_id,
-            emailType: `m365_generic_${sender.role}`
-        });
+            emailType: `generic_${sender.role}`
+        };
+
+        const emailResult = await sendEmail(emailDetails);
         
         if (emailResult.success) {
-            res.json({ success: true, message: `Email succesvol verstuurd naar ${recipientEmail}.` });
+            res.json({ 
+                success: true, 
+                message: `Email succesvol verstuurd naar ${recipientEmail} via ${emailResult.service}.`,
+                service: emailResult.service
+            });
         } else {
             sendError(res, 500, `Email versturen mislukt: ${emailResult.error}`, emailResult.details, req);
         }
@@ -38,7 +46,7 @@ router.post('/send-generic', async (req, res) => {
     }
 });
 
-// POST send an email from a teacher to a whole class
+// ✅ COMPLETELY FIXED: POST send an email from a teacher to a whole class
 router.post('/send-to-class', async (req, res) => {
     if (req.user.role !== 'teacher') return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
 
@@ -48,52 +56,152 @@ router.post('/send-to-class', async (req, res) => {
     if (!classId || !subject || !body) return sendError(res, 400, "Klas ID, onderwerp en bericht zijn verplicht.", null, req);
 
     try {
+        console.log(`📧 [EmailRoutes] Teacher ${sender.name} sending email to class ${classId}`);
+
+        // Stap 1: Controleer of de leraar eigenaar is van de klas
         const { data: classInfo, error: classError } = await supabase
             .from('classes').select('id, name, teacher_id').eq('id', classId).single();
         if (classError || !classInfo) return sendError(res, 404, "Klas niet gevonden.", null, req);
         if (classInfo.teacher_id !== sender.id) return sendError(res, 403, "U kunt alleen mailen naar uw eigen klassen.", null, req);
 
-        // Use a Supabase RPC function to get all unique parent emails from a class
-        // (This function 'get_parents_of_class' must be created in Supabase)
-        const { data: parents, error: parentsError } = await supabase.rpc('get_parents_of_class', { p_class_id: classId });
-        if (parentsError) throw parentsError;
-        if (!parents || parents.length === 0) return sendError(res, 404, "Geen ouders gevonden voor deze klas.", null, req);
+        console.log(`✅ [EmailRoutes] Class validation passed: ${classInfo.name}`);
 
+        // ==========================================================
+        // ✅ FIXED: REPLACE RPC CALL WITH DIRECT QUERIES
+        // ==========================================================
+
+        // Stap 2: Haal alle studenten op die in deze klas zitten
+        const { data: studentsInClass, error: studentsError } = await supabase
+            .from('students')
+            .select('parent_id')
+            .eq('class_id', classId)
+            .eq('active', true); // Alleen emails sturen voor actieve studenten
+
+        if (studentsError) {
+            console.error('[EmailRoutes] Error fetching students:', studentsError);
+            throw studentsError;
+        }
+
+        console.log(`📚 [EmailRoutes] Found ${studentsInClass?.length || 0} active students in class`);
+
+        if (!studentsInClass || studentsInClass.length === 0) {
+            return sendError(res, 404, "Geen actieve leerlingen (en dus geen ouders) gevonden voor deze klas.", null, req);
+        }
+
+        // Stap 3: Verzamel alle unieke parent_id's uit de lijst van studenten
+        // De .filter(Boolean) verwijdert eventuele 'null' of 'undefined' parent_id's
+        const parentIds = [...new Set(studentsInClass.map(s => s.parent_id).filter(Boolean))];
+
+        console.log(`👨‍👩‍👧‍👦 [EmailRoutes] Found ${parentIds.length} unique parent IDs`);
+
+        if (parentIds.length === 0) {
+            return sendError(res, 404, "Geen gekoppelde ouders gevonden voor de leerlingen in deze klas.", null, req);
+        }
+
+        // Stap 4: Haal de e-mailadressen en namen op van die specifieke ouders
+        const { data: parents, error: parentsError } = await supabase
+            .from('users')
+            .select('id, name, email')
+            .in('id', parentIds)
+            .eq('role', 'parent'); // Extra veiligheidscheck
+
+        if (parentsError) {
+            console.error('[EmailRoutes] Error fetching parent details:', parentsError);
+            throw parentsError;
+        }
+
+        console.log(`📧 [EmailRoutes] Found email addresses for ${parents?.length || 0} parents`);
+
+        if (!parents || parents.length === 0) {
+            return sendError(res, 404, "Kon de e-mailadressen van de ouders niet vinden in de gebruikersdatabase.", null, req);
+        }
+
+        // ==========================================================
+        // END OF FIX - REST OF CODE REMAINS THE SAME
+        // ==========================================================
+
+        // Maak de email content
         const emailBodyHtml = `
-            <p>Beste ouders/verzorgers van klas ${classInfo.name},</p>
-            <p>U heeft een bericht ontvangen van leraar ${sender.name}:</p>
-            <div style="border-left: 2px solid #ccc; padding-left: 1rem; margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div>`;
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
+                    <h2 style="color: #15803d; margin-top: 0;">Bericht van leraar ${sender.name}</h2>
+                    <p style="color: #166534; margin: 0;">Voor klas: <strong>${classInfo.name}</strong></p>
+                </div>
+                
+                <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 20px 0;">
+                    <h3 style="color: #374151; margin-top: 0;">📝 Onderwerp: ${subject}</h3>
+                    <div style="color: #4b5563; line-height: 1.6; margin: 16px 0;">
+                        ${body.replace(/\n/g, '<br>')}
+                    </div>
+                </div>
+                
+                <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                    <p style="color: #6b7280; margin: 0; font-size: 14px;">
+                        Dit bericht is verstuurd via MijnLVS. U kunt direct op deze email reageren om contact op te nemen met de leraar.
+                    </p>
+                </div>
+            </div>
+        `;
 
-        const emailPromises = parents.map(parent => 
-            sendM365EmailInternal({
+        console.log(`📤 [EmailRoutes] Preparing to send emails to ${parents.length} parents...`);
+
+        // ✅ UPDATED: Gebruik intelligente sendEmail functie voor elk ouder
+        const emailPromises = parents.map(parent => {
+            console.log(`📧 [EmailRoutes] Queueing email for parent: ${parent.name} (${parent.email})`);
+            
+            return sendEmail({
                 to: parent.email,
                 subject: `Bericht voor klas ${classInfo.name}: ${subject}`,
                 body: emailBodyHtml,
                 mosqueId: sender.mosque_id,
-                emailType: 'm365_teacher_to_class_bulk'
-            })
-        );
+                emailType: 'teacher_to_class_bulk'
+            });
+        });
         
-        // Wait for all emails to be sent
+        // Verstuur alle emails parallel
+        console.log(`⏳ [EmailRoutes] Sending ${emailPromises.length} emails...`);
         const results = await Promise.all(emailPromises);
-        const successes = results.filter(r => r.success).length;
+        
+        const successes = results.filter(r => r && r.success).length;
         const failures = results.length - successes;
 
-        res.json({ success: true, message: `Verstuur-opdracht voltooid. ${successes} email(s) succesvol, ${failures} mislukt.` });
+        console.log(`✅ [EmailRoutes] Email sending completed: ${successes} success, ${failures} failed`);
+
+        // Log successful sends
+        results.forEach((result, index) => {
+            const parent = parents[index];
+            if (result && result.success) {
+                console.log(`✅ [EmailRoutes] Email sent to ${parent.email} via ${result.service}`);
+            } else {
+                console.error(`❌ [EmailRoutes] Email failed for ${parent.email}:`, result?.error || 'Unknown error');
+            }
+        });
+
+        res.json({ 
+            success: true, 
+            message: `Verstuur-opdracht voltooid. ${successes} email(s) succesvol verzonden, ${failures} mislukt.`,
+            details: {
+                total_parents: parents.length,
+                emails_sent: successes,
+                emails_failed: failures,
+                class_name: classInfo.name
+            }
+        });
 
     } catch (error) {
+        console.error('[EmailRoutes] Error in send-to-class:', error);
         sendError(res, 500, 'Onverwachte serverfout bij versturen van bulk-email.', error.message, req);
     }
 });
 
-// POST send email to a specific parent (NEW - from monster file)
+// ✅ UPDATED: POST send email to a specific parent
 router.post('/send-to-parent', async (req, res) => {
     if (!req.user || req.user.role !== 'teacher') {
         return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
     }
 
     const { recipientUserId, subject, body } = req.body;
-    const sender = req.user; // The logged-in teacher
+    const sender = req.user;
 
     if (!recipientUserId || !subject || !body) {
         return sendError(res, 400, "Ontvanger, onderwerp en bericht zijn verplicht.", null, req);
@@ -102,168 +210,63 @@ router.post('/send-to-parent', async (req, res) => {
     try {
         const { data: recipient, error: userError } = await supabase
             .from('users')
-            .select('id, email, name, mosque_id')
+            .select('id, email, name, mosque_id, role')
             .eq('id', recipientUserId)
             .single();
+            
         if (userError || !recipient) return sendError(res, 404, "Ontvanger niet gevonden.", null, req);
         if (recipient.mosque_id !== sender.mosque_id) {
             return sendError(res, 403, "U kunt alleen mailen binnen uw eigen moskee.", null, req);
         }
+        if (recipient.role !== 'parent') {
+            return sendError(res, 400, "U kunt alleen emails sturen naar ouders.", null, req);
+        }
 
         const emailBodyHtml = `
-            <p>Beste ${recipient.name},</p>
-            <p>U heeft een bericht ontvangen van leraar ${sender.name}:</p>
-            <div style="border-left: 2px solid #ccc; padding-left: 1rem; margin: 1rem 0;">${body.replace(/\n/g, '<br>')}</div>
-            <p>Met vriendelijke groet,<br>Het team van MijnLVS</p>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
+                    <h2 style="color: #15803d; margin-top: 0;">Persoonlijk bericht van leraar</h2>
+                    <p style="color: #166534; margin: 0;">Van: <strong>${sender.name}</strong></p>
+                    <p style="color: #166534; margin: 0;">Aan: <strong>${recipient.name}</strong></p>
+                </div>
+                
+                <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 20px 0;">
+                    <h3 style="color: #374151; margin-top: 0;">📝 ${subject}</h3>
+                    <div style="color: #4b5563; line-height: 1.6; margin: 16px 0;">
+                        ${body.replace(/\n/g, '<br>')}
+                    </div>
+                </div>
+                
+                <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                    <p style="color: #6b7280; margin: 0; font-size: 14px;">
+                        Dit bericht is verstuurd via MijnLVS. U kunt direct op deze email reageren.
+                    </p>
+                </div>
+            </div>
         `;
         
-        const emailResult = await sendM365EmailInternal({ 
-            to: recipient.email, 
-            subject, 
-            body: emailBodyHtml, 
-            mosqueId: sender.mosque_id, 
-            emailType: 'm365_teacher_to_parent_email' 
-        });
+        const emailDetails = {
+            to: recipient.email,
+            subject: subject,
+            body: emailBodyHtml,
+            mosqueId: sender.mosque_id,
+            emailType: 'teacher_to_parent_direct'
+        };
+
+        const emailResult = await sendEmail(emailDetails);
 
         if (emailResult.success) {
-            res.json({ success: true, message: `Email succesvol verstuurd naar ${recipient.name}.` });
+            res.json({ 
+                success: true, 
+                message: `Email succesvol verstuurd naar ${recipient.name} via ${emailResult.service}.`,
+                service: emailResult.service
+            });
         } else {
             sendError(res, 500, `Email versturen mislukt: ${emailResult.error}`, emailResult.details, req);
         }
     } catch (error) {
         sendError(res, 500, 'Onverwachte serverfout bij versturen van e-mail.', error.message, req);
     }
-});
-
-// POST M365 test email endpoint (NEW - from monster file)
-router.post('/test-m365', async (req, res) => {
-    console.log("\n-----------------------------------------------------");
-    console.log("Backend: /api/email/test-m365 route HIT");
-    console.log("Backend: Raw req.body received:", JSON.stringify(req.body, null, 2));
-
-    let {
-        to, subject, body, mosqueId,
-        tenantId: explicitTenantId, 
-        clientId: explicitClientId, 
-        clientSecret: clientSecretFromFrontend, 
-        senderEmail: explicitSenderForTest,
-        mosqueName: mosqueNameFromFrontend, 
-    } = req.body;
-
-    if (!to || !subject || !body) {
-        console.error("Backend: M365 email (route): To, Subject, and Body zijn verplicht.");
-        return sendError(res, 400, 'M365 email (route): To, Subject, and Body zijn verplicht.', null, req);
-    }
-
-    if (clientSecretFromFrontend) { // Test scenario with explicit credentials
-        console.log("[/api/email/test-m365] Handling as EXPLICIT TEST call (clientSecret provided).");
-        try {
-            let actualTenantId = explicitTenantId;
-            let actualClientId = explicitClientId;
-            let senderToUse = explicitSenderForTest;
-
-            if (mosqueId && (!actualTenantId || !actualClientId || !senderToUse)) {
-                console.log(`[/api/email/test-m365 TEST] mosqueId ${mosqueId} provided, some explicit M365 params missing. Attempting DB lookup for missing parts.`);
-                const { data: mData, error: mError } = await supabase.from('mosques')
-                    .select('name, m365_tenant_id, m365_client_id, m365_sender_email, m365_configured')
-                    .eq('id', mosqueId).single();
-                if (mError || !mData) {
-                    console.error(`[/api/email/test-m365 TEST] Mosque ${mosqueId} not found for M365 config when params incomplete.`);
-                    return sendError(res, 404, "Mosque not found for M365 config (when explicit params incomplete in test).", null, req);
-                }
-                if (!mData.m365_configured) {
-                    console.warn(`[/api/email/test-m365 TEST] M365 not configured for mosque ${mosqueId} in DB. Proceeding with explicit params if available.`);
-                }
-                if (!actualTenantId) actualTenantId = mData.m365_tenant_id;
-                if (!actualClientId) actualClientId = mData.m365_client_id;
-                if (!senderToUse) senderToUse = mData.m365_sender_email;
-            }
-
-            if (!actualTenantId || !actualClientId || !clientSecretFromFrontend || !senderToUse) {
-                const errorMsgDetails = `TenantID: ${!!actualTenantId}, ClientID: ${!!actualClientId}, ClientSecret (from frontend): ${!!clientSecretFromFrontend}, Sender: ${!!senderToUse}`;
-                console.error(`[/api/email/test-m365 TEST] Vereiste expliciete credentials/config ontbreken. ${errorMsgDetails}`);
-                return sendError(res, 400, `M365 TEST email: Vereiste expliciete credentials/config ontbreken. ${errorMsgDetails}`, null, req);
-            }
-            
-            console.log(`[/api/email/test-m365 TEST] Final explicit credentials: Tenant=${actualTenantId}, Client=${actualClientId}, Sender=${senderToUse}, SecretProvided: Yes`);
-
-            const tokenUrl = `https://login.microsoftonline.com/${actualTenantId}/oauth2/v2.0/token`;
-            const tokenParams = new URLSearchParams();
-            tokenParams.append('client_id', actualClientId);
-            tokenParams.append('scope', 'https://graph.microsoft.com/.default');
-            tokenParams.append('client_secret', clientSecretFromFrontend);
-            tokenParams.append('grant_type', 'client_credentials');
-
-            console.log(`[/api/email/test-m365 TEST] Attempting M365 token from ${tokenUrl} for client ${actualClientId}`);
-            const tokenResponse = await axios.post(tokenUrl, tokenParams, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-            console.log("[/api/email/test-m365 TEST] M365 Token received (status " + tokenResponse.status + ")");
-            
-            const accessToken = tokenResponse.data.access_token;
-            if (!accessToken) {
-                console.error("[/api/email/test-m365 TEST] Access token missing in M365 response.");
-                return sendError(res, 500, "M365 error (test): Access token missing.", tokenResponse.data, req);
-            }
-
-            const sendMailUrl = `https://graph.microsoft.com/v1.0/users/${senderToUse}/sendMail`;
-            const emailPayload = {
-                message: { subject, body: { contentType: 'HTML', content: body }, toRecipients: [{ emailAddress: { address: to } }] },
-                saveToSentItems: 'true'
-            };
-            console.log(`[/api/email/test-m365 TEST] Sending email via Graph API. From: ${senderToUse}, To: ${to}`);
-            const emailApiResponse = await axios.post(sendMailUrl, emailPayload, { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } });
-            const msRequestId = emailApiResponse.headers['request-id'];
-            console.log(`[/api/email/test-m365 TEST] Email sent via Graph API (status ${emailApiResponse.status}). MS Request ID: ${msRequestId}`);
-
-            if (mosqueId) { 
-                try {
-                    await supabase.from('email_logs').insert([{
-                        mosque_id: mosqueId, recipient_email: to, subject, body: body.substring(0, 1000),
-                        email_type: 'm365_test_email_explicit_params', sent_status: 'sent',
-                        microsoft_message_id: msRequestId, sent_at: new Date()
-                    }]);
-                    console.log("[/api/email/test-m365 TEST] Test email logged to 'email_logs'.");
-                } catch (logError) { console.error("[/api/email/test-m365 TEST WARN] Failed to log test email:", logError.message); }
-            }
-            res.json({ success: true, message: 'TEST Email sent successfully via M365 (explicit credentials).', messageId: msRequestId });
-
-        } catch (error) { 
-            console.error("Backend: ERROR during EXPLICIT M365 email sending (test scenario)!");
-            const errorDetails = error.response?.data || { message: error.message, code: error.code };
-            const statusCode = error.response?.status || 500;
-            let errMsg = `M365 TEST email error: ${errorDetails.error_description || errorDetails.error?.message || errorDetails.message || 'Failed to send email with explicit params'}`;
-            if (error.isAxiosError && error.response?.status === 401 && error.config?.url?.includes('login.microsoftonline.com')) {
-                 errMsg = "M365 TEST email token error: Authentication failed. Check Tenant ID, Client ID, or Client Secret.";
-            } else if (error.isAxiosError && error.response?.status === 401 && error.config?.url?.includes('graph.microsoft.com')) {
-                 errMsg = "M365 TEST email Graph API error: Unauthorized. Token might be invalid or lack permissions.";
-            } else if (error.isAxiosError && error.response?.status === 403 && error.config?.url?.includes('graph.microsoft.com')) {
-                 errMsg = `M365 TEST email Graph API error: Forbidden. Sender ${explicitSenderForTest} may not have Mail.Send permission or mailbox not found/enabled.`;
-            }
-            console.error(`Backend Error (Explicit Test): Status ${statusCode}, Message: ${errMsg}`, JSON.stringify(errorDetails, null, 2));
-            sendError(res, statusCode, errMsg, errorDetails, req);
-        }
-
-    } else if (mosqueId) { // App-initiated email, use internal function that fetches DB credentials
-        console.log(`[/api/email/test-m365] Handling as APP-INITIATED email for mosque ${mosqueId}. Using internal function.`);
-        const result = await sendM365EmailInternal({ 
-            to, 
-            subject, 
-            body, 
-            mosqueId, 
-            emailType: 'm365_app_email_from_route'
-        });
-        if (result.success) {
-            res.json({ success: true, message: 'Email sent successfully via internal M365 function.', messageId: result.messageId, service: 'M365 Internal' });
-        } else {
-            sendError(res, 500, result.error || 'Failed to send email via internal M365 function.', result.details, req);
-        }
-
-    } else {
-        console.error("[/api/email/test-m365] Insufficient parameters: mosqueId (for app email) or full explicit M365 test parameters (including clientSecret) are required.");
-        sendError(res, 400, "MosqueId (for app email) or full explicit M365 test parameters (including clientSecret) are required for this route.", null, req);
-    }
-    
-    console.log("Backend: /api/email/test-m365 route processing FINISHED");
-    console.log("-----------------------------------------------------\n");
 });
 
 // GET email logs for a mosque (for admins)
@@ -342,6 +345,48 @@ router.get('/stats/mosque/:mosqueId', async (req, res) => {
 
     } catch (error) {
         sendError(res, 500, 'Fout bij ophalen email statistieken.', error.message, req);
+    }
+});
+
+// ✅ SIMPLIFIED: Test endpoint voor email functionaliteit
+router.post('/test-simple', async (req, res) => {
+    try {
+        const { to, subject, body, mosqueId } = req.body;
+        
+        if (!to || !subject || !body) {
+            return sendError(res, 400, 'To, subject en body zijn verplicht.', null, req);
+        }
+
+        console.log(`🧪 [EmailRoutes] Test email request: ${to}`);
+
+        const emailDetails = {
+            to: to,
+            subject: subject || 'Test Email',
+            body: body || '<p>Dit is een test email van MijnLVS.</p>',
+            mosqueId: mosqueId || null,
+            emailType: 'test_email'
+        };
+
+        const result = await sendEmail(emailDetails);
+        
+        if (result.success) {
+            res.json({ 
+                success: true, 
+                message: `Test email verstuurd naar ${to} via ${result.service}`,
+                service: result.service,
+                messageId: result.messageId
+            });
+        } else {
+            res.json({ 
+                success: false, 
+                error: result.error,
+                service: result.service
+            });
+        }
+
+    } catch (error) {
+        console.error('Error in test-simple route:', error);
+        sendError(res, 500, 'Test email mislukt.', error.message, req);
     }
 });
 
