@@ -6,10 +6,13 @@ const { sendError } = require('../utils/errorHelper');
 
 // === Geautomatiseerde Stripe Routes ===
 
-// POST create a stripe checkout session met tracking
+// ===== STAP 1: BACKEND (routes/paymentRoutes.js) =====
+// Vervang de bestaande POST /stripe/create-checkout-session route met:
+
 router.post('/stripe/create-checkout-session', async (req, res) => {
     try {
-        const { priceId, metadata = {} } = req.body;
+        // ✅ Ontvang de 'skipTrial' parameter uit de request body
+        const { priceId, metadata = {}, skipTrial = false } = req.body;
         
         if (!priceId) {
             return sendError(res, 400, "Prijs-ID ontbreekt.", null, req);
@@ -26,17 +29,15 @@ router.post('/stripe/create-checkout-session', async (req, res) => {
             success_url: `${process.env.FRONTEND_URL}/register?payment_success=true&session_id={CHECKOUT_SESSION_ID}&tracking_id=${trackingId}`,
             cancel_url: `${process.env.FRONTEND_URL}/?payment_canceled=true`,
             subscription_data: {
-                trial_period_days: 14,
                 metadata: {
                     ...metadata,
                     tracking_id: trackingId,
                     source: 'mijnlvs_platform',
-                    registration_pending: 'true',  // Flag voor webhook
+                    registration_pending: 'true',
                     created_at: new Date().toISOString()
                 }
             },
             billing_address_collection: 'required',
-            // Voeg custom fields toe voor extra info als gewenst
             custom_fields: [
                 {
                     key: 'organization_name',
@@ -46,6 +47,14 @@ router.post('/stripe/create-checkout-session', async (req, res) => {
                 }
             ]
         };
+
+        // ✅ DE CRUCIALE LOGICA: Voeg alleen de trial toe als het NIET wordt overgeslagen
+        if (!skipTrial) {
+            sessionData.subscription_data.trial_period_days = 14;
+            console.log(`[Stripe] Creating session WITH 14-day trial for tracking ${trackingId}`);
+        } else {
+            console.log(`[Stripe] Creating session WITHOUT trial (direct payment) for tracking ${trackingId}`);
+        }
 
         // Voor ingelogde gebruikers (upgraden vanuit dashboard)
         if (req.user) {
