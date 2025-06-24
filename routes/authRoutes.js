@@ -1,38 +1,24 @@
-// routes/authRoutes.js - DEFINITIEVE VERSIE ZONDER CYCLISCHE DEPENDENCIES
+// routes/authRoutes.js - DEFINITIEVE VERSIE MET GECENTRALISEERDE PAYMENT LINKING
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
 
-// ✅ LAZY LOADING: Import services alleen wanneer nodig
-let registrationEmailService = null;
-let paymentLinkingService = null;
+// ✅ DIRECTE IMPORTS - geen lazy loading meer
+const { linkPendingPaymentAfterRegistration } = require('../services/paymentLinkingService');
 
-// Lazy load functie voor email service
+// Lazy load alleen voor email service (als die cyclische dependencies heeft)
+let registrationEmailService = null;
 const getRegistrationEmailService = () => {
   if (!registrationEmailService) {
     try {
       registrationEmailService = require('../services/registrationEmailService');
-      console.log('✅ registrationEmailService geladen:', typeof registrationEmailService.sendRegistrationWelcomeEmail);
+      console.log('✅ registrationEmailService geladen');
     } catch (error) {
       console.error('❌ Fout bij laden registrationEmailService:', error.message);
       registrationEmailService = { sendRegistrationWelcomeEmail: null };
     }
   }
   return registrationEmailService;
-};
-
-// Lazy load functie voor payment service
-const getPaymentLinkingService = () => {
-  if (!paymentLinkingService) {
-    try {
-      paymentLinkingService = require('../services/paymentLinkingService');
-      console.log('✅ paymentLinkingService geladen:', typeof paymentLinkingService.linkPendingPaymentAfterRegistration);
-    } catch (error) {
-      console.error('❌ Fout bij laden paymentLinkingService:', error.message);
-      paymentLinkingService = { linkPendingPaymentAfterRegistration: null };
-    }
-  }
-  return paymentLinkingService;
 };
 
 // POST /api/auth/login
@@ -69,10 +55,14 @@ router.post('/auth/login', async (req, res) => {
   }
 });
 
-// POST /api/mosques/register
+// POST /api/mosques/register - VERBETERDE VERSIE MET GECENTRALISEERDE PAYMENT LINKING
 router.post('/mosques/register', async (req, res) => {
   try {
-    const { mosqueName, subdomain, adminName, adminEmail, adminPassword, address, city, zipcode, phone, website, contactEmail } = req.body;
+    const { 
+      mosqueName, subdomain, adminName, adminEmail, adminPassword, 
+      address, city, zipcode, phone, website, contactEmail,
+      trackingId, sessionId, paymentSuccess  // ✅ NIEUWE PARAMETERS
+    } = req.body;
     
     // Validatie van input
     if (!mosqueName || !subdomain || !adminName || !adminEmail || !adminPassword) {
@@ -84,6 +74,13 @@ router.post('/mosques/register', async (req, res) => {
 
     const normalizedSubdomain = subdomain.toLowerCase().trim();
     const normalizedAdminEmail = adminEmail.toLowerCase().trim();
+    
+    // ✅ LOG PAYMENT PARAMETERS
+    console.log(`[Registration] Payment parameters received:`, {
+      trackingId: trackingId ? `${trackingId.substring(0, 15)}...` : null,
+      sessionId: sessionId ? `${sessionId.substring(0, 15)}...` : null,
+      paymentSuccess: paymentSuccess
+    });
     
     // Check subdomain
     const { data: existingSubdomain, error: subdomainError } = await supabase
@@ -194,42 +191,58 @@ router.post('/mosques/register', async (req, res) => {
 
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
-        // ✅ PAYMENT LINKING met lazy loading
+        // ✅ GECENTRALISEERDE PAYMENT LINKING - GEBRUIK DE SERVICE
         let paymentLinked = false;
+        let linkingResult = null;
+        
         try {
           console.log(`🔗 [Registration] Attempting payment linking for mosque ${newMosque.id}...`);
           
-          const paymentService = getPaymentLinkingService();
-          if (paymentService.linkPendingPaymentAfterRegistration) {
-            const linkingResult = await paymentService.linkPendingPaymentAfterRegistration({
-              mosqueId: newMosque.id,
-              adminEmail: normalizedAdminEmail
+          // ✅ GEBRUIK DE ECHTE SERVICE MET ALLE PARAMETERS
+          linkingResult = await linkPendingPaymentAfterRegistration({
+            mosqueId: newMosque.id,
+            adminEmail: normalizedAdminEmail,
+            trackingId: trackingId,
+            sessionId: sessionId
+          });
+          
+          if (linkingResult.success) {
+            console.log(`✅ [Registration] Payment linked successfully!`);
+            console.log(`✅ Strategy used: ${linkingResult.strategy}`);
+            console.log(`✅ Subscription: ${linkingResult.subscriptionId}`);
+            
+            paymentLinked = true;
+            
+            // Update newMosque object met de nieuwe data
+            newMosque.subscription_status = 'active';
+            newMosque.stripe_customer_id = linkingResult.stripeCustomerId;
+            newMosque.stripe_subscription_id = linkingResult.subscriptionId;
+            newMosque.plan_type = linkingResult.planType;
+            newMosque.trial_ends_at = null; // Remove trial
+          } else {
+            console.log(`ℹ️ [Registration] Payment linking result:`, {
+              reason: linkingResult.reason,
+              strategy: linkingResult.strategy
             });
             
-            if (linkingResult.success) {
-              console.log(`✅ [Registration] Payment linked successfully! Subscription: ${linkingResult.subscriptionId}`);
-              paymentLinked = true;
-              
-              newMosque.subscription_status = 'active';
-              newMosque.stripe_customer_id = linkingResult.stripeCustomerId;
-              newMosque.stripe_subscription_id = linkingResult.subscriptionId;
-            } else {
+            // Check if it was just "no pending payments" (normal for free registrations)
+            if (linkingResult.reason === 'no_pending_payments') {
               console.log(`ℹ️ [Registration] No pending payment found - normal for free registrations`);
+            } else {
+              console.warn(`⚠️ [Registration] Payment linking failed:`, linkingResult.reason);
             }
-          } else {
-            console.warn('[Registration] Payment linking service not available');
           }
         } catch (linkingError) {
           console.error('[Registration] Payment linking failed (non-fatal):', linkingError);
+          linkingResult = { success: false, error: linkingError.message };
         }
         
-        // ✅ WELCOME EMAIL met lazy loading en betere error handling
+        // ✅ WELCOME EMAIL met verbeterde error handling
         let welcomeEmailSent = false;
         try {
           console.log(`📧 [Registration] Sending welcome email to ${normalizedAdminEmail}...`);
           
           const emailService = getRegistrationEmailService();
-          console.log(`Email service type check: ${typeof emailService.sendRegistrationWelcomeEmail}`);
           
           if (emailService.sendRegistrationWelcomeEmail && typeof emailService.sendRegistrationWelcomeEmail === 'function') {
             const welcomeEmailData = {
@@ -262,20 +275,15 @@ router.post('/mosques/register', async (req, res) => {
               console.warn(`⚠️ [Registration] Welcome email failed for ${normalizedAdminEmail}:`, emailResult ? emailResult.error : 'Unknown error');
             }
           } else {
-            console.error(`❌ [Registration] sendRegistrationWelcomeEmail is not a function! Type: ${typeof emailService.sendRegistrationWelcomeEmail}`);
-            console.log('Available methods in emailService:', Object.keys(emailService));
+            console.error(`❌ [Registration] sendRegistrationWelcomeEmail is not available`);
           }
         } catch (emailError) {
           console.error(`❌ [Registration] Error sending welcome email to ${normalizedAdminEmail}:`, emailError);
         }
         
-        // Success response
+        // ✅ SUCCESS RESPONSE MET DETAILED PAYMENT INFO
         let successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw 14-dagen proefperiode is gestart.`;
-        if (paymentLinked) {
-          successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw Professional account is direct actief.`;
-        }
-        
-        res.status(201).json({ 
+        let responseData = {
           success: true, 
           message: successMessage, 
           mosque: newMosque, 
@@ -284,10 +292,26 @@ router.post('/mosques/register', async (req, res) => {
           payment_linked: paymentLinked,
           subscription_status: newMosque.subscription_status,
           trial_ends_at: newMosque.trial_ends_at
-        });
+        };
+        
+        if (paymentLinked) {
+          successMessage = `Welkom bij MijnLVS, ${newMosque.name}! Uw Professional account is direct actief.`;
+          responseData.message = successMessage;
+          responseData.linking_strategy = linkingResult.strategy;
+          responseData.plan_type = linkingResult.planType;
+        } else if (linkingResult && linkingResult.reason) {
+          // Provide detailed info about why linking didn't work
+          responseData.linking_info = {
+            reason: linkingResult.reason,
+            strategy: linkingResult.strategy || 'none',
+            error: linkingResult.error
+          };
+        }
+        
+        res.status(201).json(responseData);
 
     } catch (error) {
-        // Rollback code
+        // Rollback code (unchanged)
         console.error("!!! REGISTRATION ERROR - STARTING ROLLBACK !!!");
         console.error("Error details:", {
           message: error.message,
@@ -342,7 +366,7 @@ router.post('/mosques/register', async (req, res) => {
   }
 });
 
-// Test routes (met lazy loading)
+// Test routes (unchanged)
 router.post('/mosques/check-email', async (req, res) => {
   try {
     const { email } = req.body;
