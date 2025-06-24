@@ -1,12 +1,12 @@
-// routes/userRoutes.js - V3.3 - Met teacher limiet controle
+// routes/userRoutes.js - V3.4 - FIXED: Clean, complete version with teacher limit check
 const router = require('express').Router();
 const { supabase } = require('../config/database');
 const { sendError } = require('../utils/errorHelper');
 const { sendEmail } = require('../services/emailService');
-// ✅ STEP 1: Import the checkUsageLimit function
+// ✅ Import the checkUsageLimit function
 const { checkUsageLimit } = require('../services/trialService');
 
-// Helper functie om een willekeurig wachtwoord te genereren.
+// Helper functie om een willekeurig wachtwoord te genereren
 const generateTempPassword = () => {
     return Math.random().toString(36).slice(2, 10) + 'A!b2'; // Genereert een 12-karakter wachtwoord
 }
@@ -45,19 +45,24 @@ router.get('/:id', async (req, res) => {
     }
 });
 
-// ✅ FIXED: POST (create) a new user with teacher limit check
+// ✅ POST (create) a new user with teacher limit check
 router.post('/', async (req, res) => {
-    if (req.user.role !== 'admin') return sendError(res, 403, "Niet geautoriseerd.", null, req);
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins mogen gebruikers aanmaken.", null, req);
+    }
     
     try {
         const { mosque_id, email, name, role, phone, address, city, zipcode, sendWelcomeEmail = true } = req.body;
 
-        if (req.user.mosque_id !== mosque_id) return sendError(res, 403, "U kunt alleen gebruikers toevoegen aan uw eigen moskee.", null, req);
-        if (!email || !name || !role) return sendError(res, 400, "Email, naam en rol zijn verplicht.", null, req);
+        // Basic validation
+        if (req.user.mosque_id !== mosque_id) {
+            return sendError(res, 403, "U kunt alleen gebruikers toevoegen aan uw eigen moskee.", null, req);
+        }
+        if (!email || !name || !role) {
+            return sendError(res, 400, "Email, naam en rol zijn verplicht.", null, req);
+        }
 
-        // ==========================================================
-        // ✅ STEP 2: ADD TEACHER LIMIT CHECK HERE
-        // ==========================================================
+        // ✅ TEACHER LIMIT CHECK
         if (role === 'teacher') {
             console.log(`🔍 [userRoutes] Checking teacher limit for mosque ${mosque_id}...`);
             const limitCheck = await checkUsageLimit(mosque_id, 'teachers');
@@ -72,15 +77,11 @@ router.post('/', async (req, res) => {
             }
             console.log(`✅ [userRoutes] Teacher limit check passed: ${limitCheck.currentCount}/${limitCheck.maxAllowed}`);
         }
-        // ==========================================================
-        // END OF THE FIX
-        // ==========================================================
 
-        // 1. Genereer hier een veilig, tijdelijk wachtwoord
-        const tempPassword = generateTempPassword();
         const normalizedEmail = email.toLowerCase().trim();
+        const tempPassword = generateTempPassword();
 
-        // 2. Maak de Supabase Auth gebruiker aan met het tijdelijke wachtwoord
+        // Create Supabase Auth user
         const { data: { user: supabaseAuthUser }, error: authError } = await supabase.auth.admin.createUser({ 
             email: normalizedEmail, 
             password: tempPassword, 
@@ -89,11 +90,13 @@ router.post('/', async (req, res) => {
         });
 
         if (authError) {
-            if (authError.message.includes('User already registered')) return sendError(res, 409, `Email ${normalizedEmail} is al geregistreerd.`, null, req);
+            if (authError.message.includes('User already registered')) {
+                return sendError(res, 409, `Email ${normalizedEmail} is al geregistreerd.`, null, req);
+            }
             return sendError(res, 500, `Fout bij aanmaken auth user: ${authError.message}`, authError, req);
         }
 
-        // 3. Stel de data voor de 'users' tabel samen ZONDER password_hash
+        // Create app user record
         const appUserData = { 
             id: supabaseAuthUser.id, 
             mosque_id, 
@@ -105,18 +108,25 @@ router.post('/', async (req, res) => {
             city, 
             zipcode, 
             amount_due: role === 'parent' ? 0 : null, 
-            is_temporary_password: true 
+            is_temporary_password: true,
+            created_at: new Date().toISOString()
         };
 
-        const { data: appUser, error: appUserError } = await supabase.from('users').insert(appUserData).select().single();
+        const { data: appUser, error: appUserError } = await supabase
+            .from('users')
+            .insert(appUserData)
+            .select()
+            .single();
+
         if (appUserError) {
-            await supabase.auth.admin.deleteUser(supabaseAuthUser.id); // Rollback
+            // Rollback auth user if app user creation fails
+            await supabase.auth.admin.deleteUser(supabaseAuthUser.id);
             throw appUserError;
         }
 
         console.log(`✅ [userRoutes] New ${role} created: ${name} (${normalizedEmail})`);
 
-        // 4. Stuur welkomstmail via intelligente routing
+        // Send welcome email
         if (sendWelcomeEmail) {
             console.log(`📧 [userRoutes] Attempting to send welcome email to ${normalizedEmail}...`);
             try {
@@ -124,7 +134,7 @@ router.post('/', async (req, res) => {
                 console.log(`✅ [userRoutes] Welcome email process initiated for ${normalizedEmail}`);
             } catch (emailError) {
                 console.error(`❌ [userRoutes] Welcome email failed for ${normalizedEmail}:`, emailError);
-                // Niet de hele operatie laten falen vanwege email problemen
+                // Don't fail the whole operation due to email problems
             }
         }
 
@@ -133,31 +143,41 @@ router.post('/', async (req, res) => {
             user: appUser,
             welcome_email_attempted: sendWelcomeEmail 
         });
+
     } catch (error) {
         const isDuplicateError = error.code === '23505' || (error.message && error.message.includes('duplicate key'));
         sendError(res, isDuplicateError ? 409 : 500, error.message, error, req);
     }
 });
 
-// ... (rest of your routes remain the same)
-
 // PUT (update) a user
 router.put('/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { data: userToUpdate, error: fetchErr } = await supabase.from('users').select('mosque_id').eq('id', id).single();
-        if (fetchErr || !userToUpdate) return sendError(res, 404, 'Gebruiker niet gevonden.', null, req);
+        const { data: userToUpdate, error: fetchErr } = await supabase
+            .from('users')
+            .select('mosque_id')
+            .eq('id', id)
+            .single();
+
+        if (fetchErr || !userToUpdate) {
+            return sendError(res, 404, 'Gebruiker niet gevonden.', null, req);
+        }
         
-        const updateData = { ...req.body, updated_at: new Date() };
+        const updateData = { ...req.body, updated_at: new Date().toISOString() };
         
+        // Remove fields that shouldn't be updated directly
         delete updateData.id;
         delete updateData.mosque_id;
         delete updateData.created_at;
         delete updateData.last_login;
 
+        // Permission-based field restrictions
         if (req.user.role === 'admin' && req.user.mosque_id === userToUpdate.mosque_id) {
+            // Admin can update most fields, but not amount_due directly
             delete updateData.amount_due; 
         } else if (req.user.id === id) {
+            // Users can only update their own basic info
             delete updateData.role;
             delete updateData.amount_due;
             delete updateData.is_temporary_password;
@@ -173,6 +193,7 @@ router.put('/:id', async (req, res) => {
             .single();
         
         if (error) throw error;
+        
         res.json({ success: true, message: 'Gebruiker bijgewerkt.', user: data });
     } catch (error) {
         sendError(res, 500, 'Fout bij bijwerken gebruiker.', error.message, req);
@@ -181,47 +202,98 @@ router.put('/:id', async (req, res) => {
 
 // DELETE a user
 router.delete('/:id', async (req, res) => {
-    if (req.user.role !== 'admin') return sendError(res, 403, "Alleen admins mogen gebruikers verwijderen.", null, req);
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins mogen gebruikers verwijderen.", null, req);
+    }
+    
     try {
         const { id } = req.params;
-        const { data: userToDelete, error: fetchErr } = await supabase.from('users').select('mosque_id').eq('id', id).single();
-        if (fetchErr || !userToDelete) return sendError(res, 404, `Gebruiker niet gevonden.`, null, req);
-        if (req.user.mosque_id !== userToDelete.mosque_id) return sendError(res, 403, "Niet geautoriseerd.", null, req);
+        const { data: userToDelete, error: fetchErr } = await supabase
+            .from('users')
+            .select('mosque_id, name, email')
+            .eq('id', id)
+            .single();
 
+        if (fetchErr || !userToDelete) {
+            return sendError(res, 404, `Gebruiker niet gevonden.`, null, req);
+        }
+        
+        if (req.user.mosque_id !== userToDelete.mosque_id) {
+            return sendError(res, 403, "Niet geautoriseerd.", null, req);
+        }
+
+        // Delete from Supabase Auth
         const { error: authDeleteError } = await supabase.auth.admin.deleteUser(id);
         if (authDeleteError && authDeleteError.message !== 'User not found') {
             return sendError(res, 500, 'Kon auth gebruiker niet verwijderen.', authDeleteError, req);
         }
 
-        const { error: appDeleteError } = await supabase.from('users').delete().eq('id', id);
+        // Delete from app users table
+        const { error: appDeleteError } = await supabase
+            .from('users')
+            .delete()
+            .eq('id', id);
+
         if (appDeleteError) throw appDeleteError;
 
+        console.log(`🗑️ [userRoutes] Deleted user: ${userToDelete.name} (${userToDelete.email})`);
         res.json({ success: true, message: 'Gebruiker verwijderd.' });
     } catch (error) {
         sendError(res, 500, `Fout bij verwijderen gebruiker.`, error.message, req);
     }
 });
 
-// POST send a new password to a user met intelligente routing
+// POST send a new password to a user
 router.post('/:userId/send-new-password', async (req, res) => {
-    if (req.user.role !== 'admin') return sendError(res, 403, "Niet geautoriseerd.", null, req);
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Niet geautoriseerd.", null, req);
+    }
+    
     const { userId } = req.params;
+    
     try {
-        const { data: user, error: userError } = await supabase.from('users').select('*').eq('id', userId).single();
-        if (userError || !user) return sendError(res, 404, 'Gebruiker niet gevonden.', null, req);
-        if (req.user.mosque_id !== user.mosque_id) return sendError(res, 403, "Niet van dezelfde moskee.", null, req);
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', userId)
+            .single();
 
-        const newTempPassword = Math.random().toString(36).slice(-10) + '!A1';
+        if (userError || !user) {
+            return sendError(res, 404, 'Gebruiker niet gevonden.', null, req);
+        }
+        
+        if (req.user.mosque_id !== user.mosque_id) {
+            return sendError(res, 403, "Niet van dezelfde moskee.", null, req);
+        }
 
-        const { error: updateAuthError } = await supabase.auth.admin.updateUserById(userId, { password: newTempPassword });
-        if (updateAuthError) return sendError(res, 500, 'Kon wachtwoord in auth systeem niet updaten.', updateAuthError, req);
+        const newTempPassword = generateTempPassword();
 
-        await supabase.from('users').update({ is_temporary_password: true }).eq('id', userId);
+        // Update password in Supabase Auth
+        const { error: updateAuthError } = await supabase.auth.admin.updateUserById(userId, { 
+            password: newTempPassword 
+        });
+
+        if (updateAuthError) {
+            return sendError(res, 500, 'Kon wachtwoord in auth systeem niet updaten.', updateAuthError, req);
+        }
+
+        // Mark as temporary password
+        await supabase
+            .from('users')
+            .update({ 
+                is_temporary_password: true,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', userId);
 
         console.log(`🔄 [userRoutes] Sending new password email to ${user.email}...`);
 
         try {
-            const { data: mosque } = await supabase.from('mosques').select('name, subdomain').eq('id', user.mosque_id).single();
+            const { data: mosque } = await supabase
+                .from('mosques')
+                .select('name, subdomain')
+                .eq('id', user.mosque_id)
+                .single();
             
             const emailDetails = {
                 to: user.email,
@@ -274,7 +346,7 @@ async function sendWelcomeEmailForNewUser(appUser, plainTextPassword) {
 
         if (mosqueError || !mosque) {
             console.error(`[userRoutes] Could not find mosque for welcome email to ${appUser.email}:`, mosqueError);
-            return;
+            return { success: false, error: 'Mosque not found' };
         }
 
         const emailDetails = {
