@@ -623,4 +623,127 @@ router.post('/', async (req, res) => {
     }
 });
 
+router.put('/:paymentId', async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Niet geautoriseerd.", null, req);
+    }
+    
+    try {
+        const { paymentId } = req.params;
+        const { parent_id, amount, payment_method, payment_date, description, notes } = req.body;
+        
+        // Validatie
+        if (!parent_id || !amount || !payment_method || !payment_date) {
+            return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
+        }
+
+        if (parseFloat(amount) <= 0) {
+            return sendError(res, 400, "Bedrag moet positief zijn.", null, req);
+        }
+
+        // Controleer of betaling bestaat en bij juiste moskee hoort
+        const { data: existingPayment, error: fetchError } = await supabase
+            .from('payments')
+            .select('id, mosque_id, parent_id')
+            .eq('id', paymentId)
+            .eq('mosque_id', req.user.mosque_id)
+            .single();
+
+        if (fetchError || !existingPayment) {
+            return sendError(res, 404, "Betaling niet gevonden.", null, req);
+        }
+
+        // Controleer of de nieuwe ouder bestaat en bij de moskee hoort
+        const { data: parent, error: parentError } = await supabase
+            .from('users')
+            .select('id, name')
+            .eq('id', parent_id)
+            .eq('mosque_id', req.user.mosque_id)
+            .eq('role', 'parent')
+            .single();
+            
+        if (parentError || !parent) {
+            return sendError(res, 400, "Ouder niet gevonden.", null, req);
+        }
+
+        // Update de betaling
+        const updateData = {
+            parent_id,
+            amount: parseFloat(amount),
+            payment_method,
+            payment_date: new Date(payment_date).toISOString(),
+            description: description || null,
+            notes: notes || null,
+            updated_at: new Date().toISOString()
+        };
+
+        const { data: updatedPayment, error: updateError } = await supabase
+            .from('payments')
+            .update(updateData)
+            .eq('id', paymentId)
+            .eq('mosque_id', req.user.mosque_id)
+            .select(`
+                *,
+                parent:parent_id(name, email),
+                processed_by_user:processed_by(name)
+            `)
+            .single();
+            
+        if (updateError) throw updateError;
+
+        console.log(`[Payment Update] Updated payment ${paymentId} by ${req.user.name}`);
+        
+        res.json({ 
+            success: true, 
+            message: `Betaling succesvol bewerkt.`, 
+            payment: updatedPayment 
+        });
+    } catch (error) {
+        console.error('Error updating payment:', error);
+        sendError(res, 500, 'Fout bij bewerken betaling.', error.message, req);
+    }
+});
+
+// DELETE /api/payments/:paymentId - Verwijder een betaling
+router.delete('/:paymentId', async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Niet geautoriseerd.", null, req);
+    }
+    
+    try {
+        const { paymentId } = req.params;
+
+        // Controleer of betaling bestaat en bij juiste moskee hoort
+        const { data: existingPayment, error: fetchError } = await supabase
+            .from('payments')
+            .select('id, mosque_id, parent_id, amount')
+            .eq('id', paymentId)
+            .eq('mosque_id', req.user.mosque_id)
+            .single();
+
+        if (fetchError || !existingPayment) {
+            return sendError(res, 404, "Betaling niet gevonden.", null, req);
+        }
+
+        // Verwijder de betaling
+        const { error: deleteError } = await supabase
+            .from('payments')
+            .delete()
+            .eq('id', paymentId)
+            .eq('mosque_id', req.user.mosque_id);
+            
+        if (deleteError) throw deleteError;
+
+        console.log(`[Payment Delete] Deleted payment ${paymentId} (€${existingPayment.amount}) by ${req.user.name}`);
+        
+        res.json({ 
+            success: true, 
+            message: `Betaling succesvol verwijderd.`
+        });
+    } catch (error) {
+        console.error('Error deleting payment:', error);
+        sendError(res, 500, 'Fout bij verwijderen betaling.', error.message, req);
+    }
+});
+
 module.exports = router;
