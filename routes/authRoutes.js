@@ -192,6 +192,9 @@ router.post('/mosques/register', async (req, res) => {
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
         // ✅ GECENTRALISEERDE PAYMENT LINKING - GEBRUIK DE SERVICE
+        let paymentLinked = false;
+        let linkingResult = { success: false, reason: 'no_session_or_tracking' };
+        
         if (sessionId || trackingId) {
           try {
             console.log(`🔗 [Registration] Attempting session-based payment linking...`);
