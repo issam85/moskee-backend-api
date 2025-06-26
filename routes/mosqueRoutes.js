@@ -40,13 +40,26 @@ router.get('/:mosqueId', async (req, res) => {
 
 // PUT update general mosque details
 router.put('/:mosqueId', async (req, res) => {
+    console.log('[Mosque Update] Request received:', {
+        mosqueId: req.params.mosqueId,
+        userId: req.user?.id,
+        userMosqueId: req.user?.mosque_id,
+        body: req.body
+    });
+
     if (!req.user || req.user.role !== 'admin' || req.user.mosque_id !== req.params.mosqueId) {
+        console.log('[Mosque Update] Authorization failed');
         return sendError(res, 403, "Niet geautoriseerd.", null, req);
     }
+    
     try {
         const { mosqueId } = req.params;
         const { name, address, city, zipcode, phone, email, website, contact_committee_name, contact_committee_email } = req.body;
-        if (!name) return sendError(res, 400, "Moskeenaam is verplicht.", null, req);
+        
+        if (!name) {
+            console.log('[Mosque Update] Name validation failed');
+            return sendError(res, 400, "Moskeenaam is verplicht.", null, req);
+        }
         
         const updatePayload = {
             name, address, city, zipcode, phone, email, website,
@@ -54,12 +67,26 @@ router.put('/:mosqueId', async (req, res) => {
             updated_at: new Date()
         };
         
-        const { data, error } = await supabase.from('mosques').update(updatePayload).eq('id', mosqueId).select().single();
-        if (error) throw error;
+        console.log('[Mosque Update] Update payload:', updatePayload);
+        
+        const { data, error } = await supabase
+            .from('mosques')
+            .update(updatePayload)
+            .eq('id', mosqueId)
+            .select()
+            .single();
+            
+        if (error) {
+            console.error('[Mosque Update] Supabase error:', error);
+            throw error;
+        }
+        
+        console.log('[Mosque Update] Update successful');
         
         delete data.m365_client_secret;
         res.json({ success: true, message: "Moskeegegevens bijgewerkt.", data });
     } catch (error) {
+        console.error('[Mosque Update] Route error:', error);
         sendError(res, 500, "Fout bij bijwerken moskeegegevens.", error.message, req);
     }
 });
