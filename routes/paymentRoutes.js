@@ -746,4 +746,172 @@ router.delete('/:paymentId', async (req, res) => {
     }
 });
 
+router.post('/stripe/emergency-upgrade', async (req, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins.", null, req);
+    }
+
+    try {
+        const mosqueId = req.user.mosque_id;
+        const { planType = 'professional' } = req.body;
+        
+        console.log(`[Emergency Upgrade] Upgrading mosque ${mosqueId} to ${planType}`);
+
+        // ✅ GECORRIGEERDE LIMITS - Professional & Premium = Onbeperkt
+        const limits = {
+            trial: { students: 10, teachers: 2 },
+            basic: { students: 10, teachers: 2 }, 
+            professional: { students: null, teachers: null }, // ✅ ONBEPERKT
+            premium: { students: null, teachers: null }       // ✅ ONBEPERKT
+        };
+        
+        const selectedLimits = limits[planType] || limits.professional;
+
+        // Force upgrade
+        const { data: updatedMosque, error } = await supabase
+            .from('mosques')
+            .update({
+                subscription_status: 'active',
+                plan_type: planType,
+                trial_ends_at: null,
+                trial_started_at: null,
+                max_students: selectedLimits.students, // null = onbeperkt
+                max_teachers: selectedLimits.teachers,  // null = onbeperkt
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', mosqueId)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        console.log(`✅ [Emergency Upgrade] Mosque ${mosqueId} upgraded to ${planType}`);
+        console.log(`✅ Students: ${selectedLimits.students || 'Onbeperkt'}, Teachers: ${selectedLimits.teachers || 'Onbeperkt'}`);
+
+        res.json({
+            success: true,
+            message: `Account succesvol geüpgraded naar ${planType}! ${planType === 'professional' || planType === 'premium' ? 'Geen restricties op aantallen.' : ''}`,
+            mosque: {
+                id: updatedMosque.id,
+                name: updatedMosque.name,
+                subscription_status: updatedMosque.subscription_status,
+                plan_type: updatedMosque.plan_type,
+                max_students: updatedMosque.max_students,
+                max_teachers: updatedMosque.max_teachers,
+                trial_ends_at: updatedMosque.trial_ends_at,
+                limits_description: planType === 'professional' || planType === 'premium' ? 'Onbeperkt' : `Max ${selectedLimits.students} leerlingen, ${selectedLimits.teachers} leraren`
+            }
+        });
+
+    } catch (error) {
+        console.error('[Emergency Upgrade] Error:', error);
+        sendError(res, 500, 'Upgrade failed.', error.message, req);
+    }
+});
+
+
+router.get('/debug/my-payments', async (req, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins.", null, req);
+    }
+
+    try {
+        const mosqueId = req.user.mosque_id;
+        
+        // Get mosque info
+        const { data: mosque, error: mosqueError } = await supabase
+            .from('mosques')
+            .select('*')
+            .eq('id', mosqueId)
+            .single();
+
+        if (mosqueError) throw mosqueError;
+
+        // Get all payments for this email
+        const { data: allPayments, error: paymentsError } = await supabase
+            .from('pending_payments')
+            .select('*')
+            .eq('customer_email', mosque.email)
+            .order('created_at', { ascending: false });
+
+        if (paymentsError) throw paymentsError;
+
+        res.json({
+            mosque: {
+                id: mosque.id,
+                name: mosque.name,
+                email: mosque.email,
+                subscription_status: mosque.subscription_status,
+                plan_type: mosque.plan_type,
+                trial_ends_at: mosque.trial_ends_at,
+                stripe_customer_id: mosque.stripe_customer_id,
+                stripe_subscription_id: mosque.stripe_subscription_id,
+                max_students: mosque.max_students,
+                max_teachers: mosque.max_teachers
+            },
+            payments: allPayments,
+            summary: {
+                total_payments: allPayments.length,
+                pending_payments: allPayments.filter(p => p.status === 'pending').length,
+                linked_payments: allPayments.filter(p => p.status === 'linked').length,
+                unlinked_payments: allPayments.filter(p => !p.mosque_id).length
+            }
+        });
+
+    } catch (error) {
+        console.error('[Debug] Error:', error);
+        sendError(res, 500, 'Debug info fout.', error.message, req);
+    }
+});
+
+
+router.post('/stripe/retry-payment-linking', async (req, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins.", null, req);
+    }
+
+    try {
+        const mosqueId = req.user.mosque_id;
+        
+        // Get mosque email
+        const { data: mosque, error: mosqueError } = await supabase
+            .from('mosques')
+            .select('email, name')
+            .eq('id', mosqueId)
+            .single();
+
+        if (mosqueError) throw mosqueError;
+
+        console.log(`[Manual Retry] Attempting payment link for ${mosque.email}`);
+
+        // Use the centralized linking service
+        const { linkPendingPaymentAfterRegistration } = require('../services/paymentLinkingService');
+        
+        const result = await linkPendingPaymentAfterRegistration({
+            mosqueId: mosqueId,
+            adminEmail: mosque.email,
+            trackingId: null,
+            sessionId: null
+        });
+
+        if (result.success) {
+            res.json({
+                success: true,
+                message: `Payment succesvol gelinkt! Uw ${result.planType} account is nu actief.`,
+                result: result
+            });
+        } else {
+            res.json({
+                success: false,
+                message: `Geen openstaande payment gevonden. Reden: ${result.reason}`,
+                result: result
+            });
+        }
+
+    } catch (error) {
+        console.error('[Manual Retry] Error:', error);
+        sendError(res, 500, 'Retry failed.', error.message, req);
+    }
+});
+
 module.exports = router;

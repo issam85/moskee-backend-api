@@ -189,67 +189,126 @@ const handleCheckoutSessionCompleted = async (session) => {
 // Probeer immediate linking voor recent geregistreerde moskeeën
 const attemptImmediateLinking = async (customerEmail, trackingId, paymentData) => {
     try {
-        // Zoek naar moskeeën geregistreerd in de laatste 30 minuten met dit email
+        console.log(`[Webhook] Attempting immediate linking for email: ${customerEmail}`);
+        
+        // ✅ FIXED: Use 'email' field instead of 'admin_email'
         const { data: recentMosques, error } = await supabase
             .from('mosques')
-            .select('id, admin_email, name')
-            .eq('admin_email', customerEmail)
-            .gte('created_at', new Date(Date.now() - 1800000).toISOString()) // Laatste 30 minuten
+            .select('id, email, name, subscription_status, created_at')
+            .eq('email', customerEmail.toLowerCase())
+            .gte('created_at', new Date(Date.now() - 1800000).toISOString()) // Last 30 minutes
             .order('created_at', { ascending: false });
 
-        if (!error && recentMosques && recentMosques.length > 0) {
-            const mosque = recentMosques[0]; // Neem de meest recente
-            console.log(`[Webhook] Found recent mosque registration for ${customerEmail}: ${mosque.name}`);
+        if (error) {
+            console.error('[Webhook] Error searching for recent mosques:', error);
+            return;
+        }
+
+        if (recentMosques && recentMosques.length > 0) {
+            const mosque = recentMosques[0]; // Most recent
+            console.log(`[Webhook] Found recent mosque: ${mosque.name} (${mosque.id})`);
+            console.log(`[Webhook] Mosque status: ${mosque.subscription_status}`);
             
-            await linkPaymentToMosque(mosque.id, paymentData);
-            
-            // Update pending payment met mosque link
-            await supabase
-                .from('pending_payments')
-                .update({ 
-                    mosque_id: mosque.id,
-                    status: 'linked'
-                })
-                .eq('stripe_subscription_id', paymentData.stripe_subscription_id);
+            // Only link if mosque is still trialing or has no subscription
+            if (['trialing', 'trial', null, undefined].includes(mosque.subscription_status)) {
+                console.log(`✅ [Webhook] Auto-linking payment to mosque: ${mosque.id}`);
+                
+                await linkPaymentToMosque(mosque.id, paymentData);
+                
+                // Update pending payment status
+                await supabase
+                    .from('pending_payments')
+                    .update({ 
+                        mosque_id: mosque.id,
+                        status: 'linked',
+                        linked_at: new Date().toISOString()
+                    })
+                    .eq('stripe_subscription_id', paymentData.stripe_subscription_id);
+                
+                console.log(`✅ [Webhook] Successfully auto-linked payment to mosque ${mosque.id}`);
+            } else {
+                console.log(`ℹ️ [Webhook] Mosque ${mosque.id} already has status: ${mosque.subscription_status}, skipping`);
+            }
         } else {
-            console.log(`[Webhook] No recent mosque registration found for ${customerEmail}`);
+            console.log(`ℹ️ [Webhook] No recent mosque registrations found for email: ${customerEmail}`);
         }
     } catch (error) {
         console.error('[Webhook] Error in immediate linking attempt:', error);
     }
 };
 
+
 // Link payment direct aan moskee
 const linkPaymentToMosque = async (mosqueId, paymentData) => {
     try {
-        // Update moskee met Stripe gegevens
+        console.log(`[Webhook] Linking payment to mosque ${mosqueId}...`);
+        
+        // ✅ GECORRIGEERDE PLAN LOGIC
+        let planType = 'professional'; // default
+        let maxStudents = null; // null = onbeperkt
+        let maxTeachers = null; // null = onbeperkt
+        
+        // Bepaal plan type op basis van metadata of bedrag
+        if (paymentData.metadata && paymentData.metadata.plan_type) {
+            planType = paymentData.metadata.plan_type;
+        } else if (paymentData.amount >= 49) {
+            planType = 'premium';
+        } else if (paymentData.amount >= 29) {
+            planType = 'professional';
+        }
+
+        // ✅ ALLEEN TRIAL/BASIC HEBBEN RESTRICTIES
+        if (planType === 'trial' || planType === 'basic') {
+            maxStudents = 10;
+            maxTeachers = 2;
+        }
+        // Professional en Premium blijven null (onbeperkt)
+
+        console.log(`[Webhook] Upgrading mosque to ${planType} plan (${maxStudents || 'onbeperkt'} students)`);
+
+        // ✅ ATOMIC UPDATE
         const updateData = {
             stripe_customer_id: paymentData.stripe_customer_id,
             stripe_subscription_id: paymentData.stripe_subscription_id,
-            subscription_status: 'active', // Direct actief na betaling
-            trial_ends_at: null, // Remove trial restriction
+            subscription_status: 'active',
+            plan_type: planType,
+            max_students: maxStudents, // null voor Professional/Premium
+            max_teachers: maxTeachers, // null voor Professional/Premium
+            trial_ends_at: null,
+            trial_started_at: null,
             updated_at: new Date().toISOString()
         };
 
-        const { error: updateError } = await supabase
+        const { data: updatedMosque, error: updateError } = await supabase
             .from('mosques')
             .update(updateData)
-            .eq('id', mosqueId);
+            .eq('id', mosqueId)
+            .select()
+            .single();
 
         if (updateError) {
+            console.error('[Webhook] Error updating mosque:', updateError);
             throw updateError;
         }
 
-        console.log(`✅ [Webhook] Successfully linked payment to mosque ${mosqueId}`);
+        console.log(`✅ [Webhook] Mosque ${mosqueId} upgraded successfully:`);
+        console.log(`   - Status: ${updatedMosque.subscription_status}`);
+        console.log(`   - Plan: ${updatedMosque.plan_type}`);
+        console.log(`   - Max Students: ${updatedMosque.max_students || 'Onbeperkt'}`);
+        console.log(`   - Max Teachers: ${updatedMosque.max_teachers || 'Onbeperkt'}`);
         
-        // Verstuur welkomst email
+        // Send welcome email
         await sendWelcomeEmail(mosqueId, paymentData.stripe_subscription_id);
+        
+        return updatedMosque;
         
     } catch (error) {
         console.error('[Webhook] Error linking payment to mosque:', error);
         throw error;
     }
 };
+
+
 
 // Buffer webhook event voor later processing
 const bufferWebhookEvent = async (session, subscription, customerEmail) => {
