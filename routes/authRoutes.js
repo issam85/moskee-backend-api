@@ -192,49 +192,44 @@ router.post('/mosques/register', async (req, res) => {
         console.log(`✅ Registration completed successfully for ${normalizedAdminEmail}`);
         
         // ✅ GECENTRALISEERDE PAYMENT LINKING - GEBRUIK DE SERVICE
-        let paymentLinked = false;
-        let linkingResult = null;
-        
-        try {
-          console.log(`🔗 [Registration] Attempting payment linking for mosque ${newMosque.id}...`);
-          
-          // ✅ GEBRUIK DE ECHTE SERVICE MET ALLE PARAMETERS
-          linkingResult = await linkPendingPaymentAfterRegistration({
-            mosqueId: newMosque.id,
-            adminEmail: normalizedAdminEmail,
-            trackingId: trackingId,
-            sessionId: sessionId
-          });
-          
-          if (linkingResult.success) {
-            console.log(`✅ [Registration] Payment linked successfully!`);
-            console.log(`✅ Strategy used: ${linkingResult.strategy}`);
-            console.log(`✅ Subscription: ${linkingResult.subscriptionId}`);
+        if (sessionId || trackingId) {
+          try {
+            console.log(`🔗 [Registration] Attempting session-based payment linking...`);
             
-            paymentLinked = true;
+            // Call de nieuwe session-based endpoint direct
+            const { findPaymentBySession } = require('../services/sessionLinkingService');
             
-            // Update newMosque object met de nieuwe data
-            newMosque.subscription_status = 'active';
-            newMosque.stripe_customer_id = linkingResult.stripeCustomerId;
-            newMosque.stripe_subscription_id = linkingResult.subscriptionId;
-            newMosque.plan_type = linkingResult.planType;
-            newMosque.trial_ends_at = null; // Remove trial
-          } else {
-            console.log(`ℹ️ [Registration] Payment linking result:`, {
-              reason: linkingResult.reason,
-              strategy: linkingResult.strategy
-            });
+            let pendingPayment = null;
             
-            // Check if it was just "no pending payments" (normal for free registrations)
-            if (linkingResult.reason === 'no_pending_payments') {
-              console.log(`ℹ️ [Registration] No pending payment found - normal for free registrations`);
-            } else {
-              console.warn(`⚠️ [Registration] Payment linking failed:`, linkingResult.reason);
+            if (sessionId) {
+              pendingPayment = await findPaymentBySession(sessionId);
+              console.log(`[Registration] Session lookup result:`, !!pendingPayment);
             }
+            
+            if (pendingPayment) {
+              const { executeSessionBasedLinking } = require('../services/sessionLinkingService');
+              const result = await executeSessionBasedLinking(newMosque.id, pendingPayment, sessionId);
+              
+              paymentLinked = true;
+              linkingResult = {
+                success: true,
+                strategy: 'session_id',
+                planType: result.planType,
+                subscriptionId: pendingPayment.stripe_subscription_id,
+                stripeCustomerId: pendingPayment.stripe_customer_id
+              };
+              
+              // Update mosque object
+              newMosque.subscription_status = 'active';
+              newMosque.plan_type = result.planType;
+              newMosque.trial_ends_at = null;
+              
+              console.log(`✅ [Registration] Payment linked via session_id!`);
+            }
+          } catch (linkingError) {
+            console.error('[Registration] Session linking failed:', linkingError);
+            linkingResult = { success: false, error: linkingError.message };
           }
-        } catch (linkingError) {
-          console.error('[Registration] Payment linking failed (non-fatal):', linkingError);
-          linkingResult = { success: false, error: linkingError.message };
         }
         
         // ✅ WELCOME EMAIL met verbeterde error handling
