@@ -111,78 +111,47 @@ const handleStripeWebhook = async (req, res) => {
 
 // Handle checkout session completed - KERNFUNCTIE VAN AUTOMATION
 const handleCheckoutSessionCompleted = async (session) => {
-    console.log(`[Webhook] Processing checkout session: ${session.id}`);
+    console.log(`[Enhanced Webhook] Processing session: ${session.id}`);
     
-    const subscriptionId = session.subscription;
-    const customerId = session.customer;
-    const customerEmail = session.customer_email;
-
-    if (!subscriptionId) {
-        console.warn('[Webhook] No subscription ID in checkout session');
-        return;
-    }
-
-    // Haal subscription details op
-    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-    const metadata = subscription.metadata;
-    const trackingId = metadata.tracking_id;
-    const mosqueId = metadata.app_mosque_id;
-
-    // Store in pending_payments tabel voor tracking
+    const subscription = await stripe.subscriptions.retrieve(session.subscription);
+    const trackingId = subscription.metadata.tracking_id;
+    const mosqueId = subscription.metadata.app_mosque_id;
+    
+    // ✅ KRITIEKE VERBETERING: Store session_id als primaire key
     const pendingPaymentData = {
         tracking_id: trackingId,
-        stripe_session_id: session.id,
-        stripe_customer_id: customerId,
-        stripe_subscription_id: subscriptionId,
-        customer_email: customerEmail,
+        stripe_session_id: session.id,  // ✅ CRITICAL: Store session ID
+        stripe_customer_id: session.customer,
+        stripe_subscription_id: session.subscription,
+        customer_email: session.customer_email?.toLowerCase(),
         amount: (session.amount_total || 0) / 100,
         currency: session.currency || 'eur',
-        metadata: metadata,
-        status: 'pending'
+        metadata: subscription.metadata,
+        status: 'pending',
+        expires_at: new Date(Date.now() + 7200000).toISOString(),
+        created_at: new Date().toISOString()
     };
-
-    try {
-        // Insert pending payment record
-        const { error: insertError } = await supabase
-            .from('pending_payments')
-            .insert(pendingPaymentData);
-            
-        if (insertError) {
-            // Als het al bestaat (duplicate tracking_id), update dan
-            if (insertError.code === '23505') { // unique violation
-                await supabase
-                    .from('pending_payments')
-                    .update({
-                        stripe_session_id: session.id,
-                        stripe_customer_id: customerId,
-                        stripe_subscription_id: subscriptionId,
-                        customer_email: customerEmail,
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq('tracking_id', trackingId);
-                console.log(`[Webhook] Updated existing pending payment for tracking ID: ${trackingId}`);
-            } else {
-                throw insertError;
-            }
-        } else {
-            console.log(`[Webhook] ✅ Stored pending payment for tracking ID: ${trackingId}`);
-        }
-    } catch (error) {
-        console.error('[Webhook] Error storing pending payment:', error);
-        // Continue met processing, ook al ging opslaan fout
+    
+    // ✅ UPSERT PATTERN: Voorkom duplicaten
+    const { error: upsertError } = await supabase
+        .from('pending_payments')
+        .upsert(pendingPaymentData, { 
+            onConflict: 'stripe_session_id',
+            ignoreDuplicates: false 
+        });
+    
+    if (upsertError) {
+        console.error('[Enhanced Webhook] Upsert error:', upsertError);
+    } else {
+        console.log(`✅ [Enhanced Webhook] Stored payment with session ID: ${session.id}`);
     }
-
-    // Als moskee ID bekend is (ingelogde gebruiker), direct verwerken
-    if (mosqueId && mosqueId !== 'undefined' && mosqueId !== 'null') {
-        console.log(`[Webhook] Direct linking for known mosque: ${mosqueId}`);
+    
+    // Direct linking voor ingelogde gebruikers
+    if (mosqueId && mosqueId !== 'undefined') {
         await linkPaymentToMosque(mosqueId, pendingPaymentData);
     } else {
-        // Buffer webhook event voor later processing bij anonieme betaling
-        console.log(`[Webhook] Buffering event for anonymous payment, email: ${customerEmail}`);
-        await bufferWebhookEvent(session, subscription, customerEmail);
-        
-        // Probeer immediate linking op basis van recent geregistreerde moskeeën
-        await attemptImmediateLinking(customerEmail, trackingId, pendingPaymentData);
+        // Check voor pending registraties
+        await checkForPendingRegistrations(session.id, session.customer_email);
     }
 };
 
@@ -847,9 +816,44 @@ const cleanupOldWebhookEvents = async () => {
     }
 };
 
+const checkForPendingRegistrations = async (sessionId, customerEmail) => {
+    if (!customerEmail) return;
+    
+    console.log(`[Pending Check] Looking for recent registrations for: ${customerEmail}`);
+    
+    const thirtyMinutesAgo = new Date(Date.now() - 1800000).toISOString();
+    
+    const { data: recentMosques } = await supabase
+        .from('mosques')
+        .select('id, email, name, subscription_status')
+        .eq('email', customerEmail.toLowerCase())
+        .gte('created_at', thirtyMinutesAgo)
+        .in('subscription_status', ['trialing', 'trial', null])
+        .order('created_at', { ascending: false });
+    
+    if (recentMosques?.length > 0) {
+        const mosque = recentMosques[0];
+        console.log(`✅ [Pending Check] Found recent mosque ${mosque.id}, attempting auto-link`);
+        
+        const { data: payment } = await supabase
+            .from('pending_payments')
+            .select('*')
+            .eq('stripe_session_id', sessionId)
+            .single();
+        
+        if (payment) {
+            // Gebruik de nieuwe session-based linking functie
+            const { executeSessionBasedLinking } = require('./sessionLinkingService');
+            await executeSessionBasedLinking(mosque.id, payment, sessionId);
+            console.log(`✅ [Auto Link] Successfully linked session ${sessionId} to mosque ${mosque.id}`);
+        }
+    }
+};
+
 module.exports = { 
     handleStripeWebhook,
     linkPaymentToMosque,
+    checkForPendingRegistrations, 
     logPaymentEvent,
     sendWelcomeEmail,
     sendTrialEndingEmail,

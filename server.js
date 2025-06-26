@@ -25,6 +25,8 @@ const emailRoutes = require('./routes/emailRoutes');
 const debugRoutes = require('./routes/debugRoutes');
 const trialRoutes = require('./routes/trialRoutes'); // ✅ ADD THIS LINE
 const { handleStripeWebhook } = require('./services/stripeService');
+require('./jobs/sessionRetryJob');
+console.log('✅ Session retry cron job initialized');
 
 const app = express();
 const PORT = process.env.PORT || 3001;

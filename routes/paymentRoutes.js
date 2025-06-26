@@ -235,6 +235,68 @@ router.post('/stripe/link-pending-payment', async (req, res) => {
     }
 });
 
+router.post('/stripe/link-by-session', async (req, res) => {
+    try {
+        const { mosque_id, session_id, tracking_id, admin_email } = req.body;
+        
+        if (!mosque_id || !session_id) {
+            return sendError(res, 400, "Mosque ID en Session ID zijn verplicht.", null, req);
+        }
+        
+        console.log(`[Session Linking] Attempting link for mosque ${mosque_id}, session: ${session_id}`);
+        
+        const { findPaymentBySession, executeSessionBasedLinking, queueSessionRetry } = require('../services/sessionLinkingService');
+        
+        // Strategy 1: Direct session ID lookup
+        let pendingPayment = await findPaymentBySession(session_id);
+        
+        if (!pendingPayment && tracking_id) {
+            // Strategy 2: Tracking ID fallback
+            const { data } = await supabase
+                .from('pending_payments')
+                .select('*')
+                .eq('tracking_id', tracking_id)
+                .in('status', ['pending', 'completed'])
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            pendingPayment = data;
+        }
+        
+        if (pendingPayment) {
+            console.log(`✅ [Session Linking] Found payment ${pendingPayment.id} via session ${session_id}`);
+            
+            const result = await executeSessionBasedLinking(mosque_id, pendingPayment, session_id);
+            
+            res.json({
+                success: true,
+                message: `Betaling succesvol gekoppeld! Uw ${result.planType} account is direct actief.`,
+                payment_id: pendingPayment.id,
+                subscription_status: 'active',
+                plan_type: result.planType,
+                session_id: session_id,
+                linking_method: 'session_id'
+            });
+            
+        } else {
+            console.log(`⚠️ [Session Linking] No payment found for session ${session_id}`);
+            
+            await queueSessionRetry(mosque_id, session_id, tracking_id, admin_email);
+            
+            res.json({
+                success: false,
+                message: 'Payment wordt nog verwerkt. Probeer over een paar minuten opnieuw.',
+                session_id: session_id,
+                queued_for_retry: true
+            });
+        }
+        
+    } catch (error) {
+        console.error('[Session Linking] Error:', error);
+        sendError(res, 500, 'Session linking failed.', error.message, req);
+    }
+});
+
 // Helper functie voor buffered webhook events
 const processBufferedWebhookEvents = async (mosqueId, email, subscriptionId) => {
     try {
@@ -746,6 +808,7 @@ router.delete('/:paymentId', async (req, res) => {
     }
 });
 
+//kan er wellicht uit
 router.post('/stripe/emergency-upgrade', async (req, res) => {
     if (!req.user || req.user.role !== 'admin') {
         return sendError(res, 403, "Alleen admins.", null, req);
@@ -809,7 +872,7 @@ router.post('/stripe/emergency-upgrade', async (req, res) => {
     }
 });
 
-
+//kan er wellicht uit
 router.get('/debug/my-payments', async (req, res) => {
     if (!req.user || req.user.role !== 'admin') {
         return sendError(res, 403, "Alleen admins.", null, req);
@@ -864,7 +927,7 @@ router.get('/debug/my-payments', async (req, res) => {
     }
 });
 
-
+//kan er wellicht uit
 router.post('/stripe/retry-payment-linking', async (req, res) => {
     if (!req.user || req.user.role !== 'admin') {
         return sendError(res, 403, "Alleen admins.", null, req);
@@ -911,6 +974,65 @@ router.post('/stripe/retry-payment-linking', async (req, res) => {
     } catch (error) {
         console.error('[Manual Retry] Error:', error);
         sendError(res, 500, 'Retry failed.', error.message, req);
+    }
+});
+
+router.post('/stripe/link-by-session', async (req, res) => {
+    try {
+        const { mosque_id, session_id, tracking_id, admin_email } = req.body;
+        
+        if (!mosque_id || !session_id) {
+            return sendError(res, 400, "Mosque ID en Session ID zijn verplicht.", null, req);
+        }
+        
+        console.log(`[Session Linking] Attempting link for mosque ${mosque_id}, session: ${session_id}`);
+        
+        // Strategy 1: Direct session ID lookup (most reliable)
+        let pendingPayment = await findPaymentBySession(session_id);
+        
+        if (!pendingPayment && tracking_id) {
+            // Strategy 2: Tracking ID fallback
+            pendingPayment = await findPaymentByTracking(tracking_id);
+        }
+        
+        if (!pendingPayment && admin_email) {
+            // Strategy 3: Recent email lookup as last resort
+            pendingPayment = await findRecentPaymentByEmail(admin_email);
+        }
+        
+        if (pendingPayment) {
+            console.log(`✅ [Session Linking] Found payment ${pendingPayment.id} via session ${session_id}`);
+            
+            // Execute atomic linking
+            const result = await executeSessionBasedLinking(mosque_id, pendingPayment, session_id);
+            
+            res.json({
+                success: true,
+                message: `Betaling succesvol gekoppeld! Uw ${result.planType} account is direct actief.`,
+                payment_id: pendingPayment.id,
+                subscription_status: 'active',
+                plan_type: result.planType,
+                session_id: session_id,
+                linking_method: 'session_id'
+            });
+            
+        } else {
+            console.log(`⚠️ [Session Linking] No payment found for session ${session_id}`);
+            
+            // Queue for retry with session context
+            await queueSessionRetry(mosque_id, session_id, tracking_id, admin_email);
+            
+            res.json({
+                success: false,
+                message: 'Payment wordt nog verwerkt. Probeer over een paar minuten opnieuw.',
+                session_id: session_id,
+                queued_for_retry: true
+            });
+        }
+        
+    } catch (error) {
+        console.error('[Session Linking] Error:', error);
+        sendError(res, 500, 'Session linking failed.', error.message, req);
     }
 });
 
