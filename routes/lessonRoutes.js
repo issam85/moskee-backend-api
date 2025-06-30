@@ -71,7 +71,12 @@ router.post('/', async (req, res) => {
         const { data: existingLesson } = await supabase.from('lessen').select('id').eq('klas_id', klas_id).eq('les_datum', les_datum).maybeSingle();
         if (existingLesson) return sendError(res, 409, `Er bestaat al een les voor deze klas op ${les_datum}.`, null, req);
 
-        const lesData = { ...req.body, les_dag_van_week: new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' }) };
+        const lesData = { 
+            ...req.body, 
+            moskee_id: req.body.mosque_id, // Map English field name to Dutch database field
+            les_dag_van_week: new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' }) 
+        };
+        delete lesData.mosque_id; // Remove the English field name
         const { data: newLesson, error } = await supabase.from('lessen').insert(lesData).select().single();
         if (error) throw error;
         res.status(201).json({ success: true, message: 'Les aangemaakt.', data: newLesson });
