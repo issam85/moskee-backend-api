@@ -98,7 +98,9 @@ router.post('/send-generic', async (req, res) => {
             subject: subject,
             body: emailBodyHtml,
             mosqueId: sender.mosque_id,
-            emailType: `generic_${sender.role}`
+            emailType: `generic_${sender.role}`,
+            // ✅ FIX: Add reply-to header for parent emails so teachers can reply directly
+            replyTo: emailContext === 'parent_to_teacher' ? sender.email : null
         };
 
         const emailResult = await sendEmail(emailDetails);

@@ -1,71 +1,37 @@
 // services/emailTemplates.js - Mooie templates voor alle email types
 
-// ✅ NIEUWE TEMPLATE: Ouder naar Leraar
+// ✅ OPTIMIZED TEMPLATE: Ouder naar Leraar - Simplified for better deliverability
 const generateParentToTeacherEmail = (parentInfo, teacherInfo, subject, body, studentInfo = null) => {
     return `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9fafb;">
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
             <!-- Header -->
-            <div style="text-align: center; margin-bottom: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px; color: white;">
-                <h1 style="margin: 0; font-size: 24px;">📬 Bericht van Ouder</h1>
-                <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Verzonden via MijnLVS</p>
+            <div style="background: #10b981; padding: 20px; border-radius: 8px; color: white; text-align: center; margin-bottom: 20px;">
+                <h1 style="margin: 0; font-size: 20px;">Bericht van Ouder</h1>
+                <p style="margin: 5px 0 0 0; opacity: 0.9;">via MijnLVS</p>
             </div>
             
-            <!-- Van/Naar Info -->
-            <div style="background: #e0f2fe; border: 1px solid #81d4fa; border-radius: 12px; padding: 24px; margin: 24px 0;">
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-                    <div>
-                        <h3 style="color: #0277bd; margin: 0 0 8px 0; font-size: 16px;">👨‍👩‍👧‍👦 Van:</h3>
-                        <p style="color: #01579b; margin: 0; font-weight: 500;">${parentInfo.name}</p>
-                        <p style="color: #0288d1; margin: 4px 0 0 0; font-size: 14px;">${parentInfo.email}</p>
-                        ${studentInfo ? `<p style="color: #0288d1; margin: 4px 0 0 0; font-size: 14px;">Ouder van: <strong>${studentInfo.name}</strong></p>` : ''}
-                    </div>
-                    <div>
-                        <h3 style="color: #0277bd; margin: 0 0 8px 0; font-size: 16px;">👨‍🏫 Aan:</h3>
-                        <p style="color: #01579b; margin: 0; font-weight: 500;">${teacherInfo.name}</p>
-                        <p style="color: #0288d1; margin: 4px 0 0 0; font-size: 14px;">${teacherInfo.email}</p>
-                        <p style="color: #0288d1; margin: 4px 0 0 0; font-size: 14px;">Leraar</p>
-                    </div>
-                </div>
+            <!-- Contact Info -->
+            <div style="background: #f3f4f6; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                <p style="margin: 0; color: #374151;"><strong>Van:</strong> ${parentInfo.name} (${parentInfo.email})</p>
+                ${studentInfo ? `<p style="margin: 5px 0 0 0; color: #6b7280;">Ouder van: ${studentInfo.name}</p>` : ''}
+                <p style="margin: 5px 0 0 0; color: #374151;"><strong>Aan:</strong> ${teacherInfo.name}</p>
             </div>
             
-            <!-- Onderwerp -->
-            <div style="background: #fff3e0; border: 1px solid #ffb74d; border-radius: 8px; padding: 20px; margin: 24px 0;">
-                <h3 style="color: #e65100; margin: 0 0 8px 0; font-size: 18px;">📝 Onderwerp:</h3>
-                <p style="color: #bf360c; margin: 0; font-size: 16px; font-weight: 500;">${subject}</p>
+            <!-- Subject -->
+            <div style="margin-bottom: 20px;">
+                <h2 style="color: #374151; font-size: 18px; margin: 0 0 10px 0;">Onderwerp: ${subject}</h2>
             </div>
             
-            <!-- Bericht Content -->
-            <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 30px; margin: 24px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                <h3 style="color: #374151; margin: 0 0 16px 0; font-size: 18px; border-bottom: 2px solid #f3f4f6; padding-bottom: 8px;">💬 Bericht:</h3>
-                <div style="color: #4b5563; line-height: 1.7; font-size: 15px;">
+            <!-- Message Content -->
+            <div style="background: #ffffff; border: 1px solid #d1d5db; padding: 20px; border-radius: 6px; margin-bottom: 20px;">
+                <div style="color: #374151; line-height: 1.6;">
                     ${body.replace(/\n/g, '<br>')}
                 </div>
             </div>
             
-            <!-- Reactie Instructies -->
-            <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 24px 0;">
-                <h3 style="color: #15803d; margin: 0 0 12px 0; font-size: 16px;">↩️ Reageren:</h3>
-                <p style="color: #166534; margin: 0; font-size: 14px; line-height: 1.5;">
-                    U kunt direct op deze email reageren om ${parentInfo.name} te antwoorden. 
-                    Uw antwoord wordt automatisch naar het juiste email adres gestuurd.
-                </p>
-            </div>
-            
             <!-- Footer -->
-            <div style="text-align: center; color: #6b7280; margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-                <p style="margin: 0; font-size: 14px;">
-                    Dit bericht is verzonden via <strong style="color: #10b981;">MijnLVS</strong>
-                </p>
-                <p style="margin: 8px 0 0 0; font-size: 12px;">
-                    Automatisch gegenereerd op ${new Date().toLocaleDateString('nl-NL', { 
-                        weekday: 'long', 
-                        year: 'numeric', 
-                        month: 'long', 
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    })}
-                </p>
+            <div style="text-align: center; color: #9ca3af; font-size: 14px; margin-top: 30px;">
+                <p style="margin: 0;">Dit bericht is verzonden via MijnLVS</p>
             </div>
         </div>
     `;
