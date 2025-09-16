@@ -38,6 +38,7 @@ const corsOptions = {
       'http://localhost:3000',
       'https://mijnlvs.nl',
       'https://www.mijnlvs.nl',
+      'https://al-hijra.mijnlvs.nl',
     ];
     const allowedOriginPatterns = [
       /^https:\/\/[a-z0-9-]+\.mijnlvs\.nl$/,
