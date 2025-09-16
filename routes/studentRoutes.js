@@ -55,8 +55,8 @@ router.post('/', async (req, res) => {
     }
     
     try {
-        if (!mosque_id || !parent_id || !class_id || !name) {
-            return sendError(res, 400, "Verplichte velden (mosque_id, parent_id, class_id, name) ontbreken.", null, req);
+        if (!mosque_id || !parent_id || !name) {
+            return sendError(res, 400, "Verplichte velden (mosque_id, parent_id, name) ontbreken.", null, req);
         }
         
         // ✅ FIXED: Added usage limit check inside the async function
