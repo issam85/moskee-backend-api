@@ -188,46 +188,71 @@ router.post('/send-to-class', async (req, res) => {
 
         console.log(`📤 [EmailRoutes] Preparing to send emails to ${parents.length} parents...`);
 
-        // ✅ FIXED: Gebruik intelligente sendEmail functie met nieuwe template voor elk ouder
-        const emailPromises = parents.map(parent => {
-            console.log(`📧 [EmailRoutes] Queueing email for parent: ${parent.name} (${parent.email})`);
-            
-            // ✅ Use the new beautiful template
-            const emailBodyHtml = generateTeacherToClassEmail(
-                { name: sender.name, email: sender.email, role: sender.role },
-                classInfo,
-                subject,
-                body,
-                parent.name // Pass parent name for personalization
-            );
-            
-            return sendEmail({
-                to: parent.email,
-                subject: `Bericht voor klas ${classInfo.name}: ${subject}`,
-                body: emailBodyHtml,
-                mosqueId: sender.mosque_id,
-                emailType: 'teacher_to_class_bulk'
+        // ✅ FIXED: Verstuur emails met proper error handling in batches
+        const BATCH_SIZE = 5; // Kleinere batches voor klasmail
+        const DELAY_BETWEEN_BATCHES = 500; // 0.5 seconde tussen batches
+
+        const allResults = [];
+
+        for (let i = 0; i < parents.length; i += BATCH_SIZE) {
+            const batch = parents.slice(i, i + BATCH_SIZE);
+            console.log(`📧 [EmailRoutes] Processing class email batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(parents.length/BATCH_SIZE)} (${batch.length} emails)`);
+
+            const batchPromises = batch.map(async (parent) => {
+                try {
+                    // Use the beautiful template
+                    const emailBodyHtml = generateTeacherToClassEmail(
+                        { name: sender.name, email: sender.email, role: sender.role },
+                        classInfo,
+                        subject,
+                        body,
+                        parent.name
+                    );
+
+                    const result = await sendEmail({
+                        to: parent.email,
+                        subject: `Bericht voor klas ${classInfo.name}: ${subject}`,
+                        body: emailBodyHtml,
+                        mosqueId: sender.mosque_id,
+                        emailType: 'teacher_to_class_bulk'
+                    });
+
+                    return { success: true, email: parent.email, result };
+                } catch (error) {
+                    console.error(`❌ [EmailRoutes] Failed to send class email to ${parent.email}:`, error.message);
+                    return { success: false, email: parent.email, error: error.message };
+                }
             });
-        });
-        
-        // Verstuur alle emails parallel
-        console.log(`⏳ [EmailRoutes] Sending ${emailPromises.length} emails...`);
-        const results = await Promise.all(emailPromises);
-        
-        const successes = results.filter(r => r && r.success).length;
-        const failures = results.length - successes;
 
-        console.log(`✅ [EmailRoutes] Email sending completed: ${successes} success, ${failures} failed`);
+            const batchResults = await Promise.allSettled(batchPromises);
+            allResults.push(...batchResults);
 
-        // Log successful sends
-        results.forEach((result, index) => {
-            const parent = parents[index];
-            if (result && result.success) {
-                console.log(`✅ [EmailRoutes] Email sent to ${parent.email} via ${result.service}`);
-            } else {
-                console.error(`❌ [EmailRoutes] Email failed for ${parent.email}:`, result?.error || 'Unknown error');
+            // Wacht tussen batches
+            if (i + BATCH_SIZE < parents.length) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
             }
-        });
+        }
+
+        // Parse resultaten van Promise.allSettled
+        const successfulResults = allResults.filter(r => r.status === 'fulfilled' && r.value?.success);
+        const failedResults = allResults.filter(r => r.status === 'rejected' || !r.value?.success);
+
+        const successes = successfulResults.length;
+        const failures = failedResults.length;
+
+        console.log(`✅ [EmailRoutes] Class email sending completed: ${successes} success, ${failures} failed`);
+
+        // Log alleen samenvattende informatie om rate limiting te voorkomen
+        if (failures > 0) {
+            console.log(`❌ [EmailRoutes] ${failures} class emails failed. First few errors:`);
+            failedResults.slice(0, 2).forEach(result => {
+                if (result.status === 'rejected') {
+                    console.error(`❌ Rejected:`, result.reason?.message || result.reason);
+                } else {
+                    console.error(`❌ Failed for ${result.value?.email}:`, result.value?.error);
+                }
+            });
+        }
 
         res.json({ 
             success: true, 
