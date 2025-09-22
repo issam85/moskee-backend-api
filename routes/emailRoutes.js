@@ -454,47 +454,74 @@ router.post('/send-to-all-parents', async (req, res) => {
 
         console.log(`📤 [EmailRoutes] Preparing to send bulk message to ${parents.length} parents...`);
 
-        // Stap 3: Verstuur email naar alle ouders
-        const emailPromises = parents.map(parent => {
-            console.log(`📧 [EmailRoutes] Queueing bulk email for parent: ${parent.name} (${parent.email})`);
+        // Stap 3: Verstuur emails in batches om rate limiting te voorkomen
+        const BATCH_SIZE = 10; // Verstuur max 10 emails tegelijk
+        const DELAY_BETWEEN_BATCHES = 1000; // 1 seconde tussen batches
 
-            // Gebruik de nieuwe admin bulk template
-            const emailBodyHtml = generateAdminToAllParentsEmail(
-                { name: sender.name, email: sender.email, role: sender.role },
-                mosqueInfo,
-                subject,
-                body,
-                parent.name
-            );
+        const allResults = [];
 
-            return sendEmail({
-                to: parent.email,
-                subject: `Belangrijk bericht van ${mosqueInfo.name}: ${subject}`,
-                body: emailBodyHtml,
-                mosqueId: sender.mosque_id,
-                emailType: 'admin_to_all_parents_bulk',
-                replyTo: sender.email // Ouders kunnen direct reageren naar admin
+        for (let i = 0; i < parents.length; i += BATCH_SIZE) {
+            const batch = parents.slice(i, i + BATCH_SIZE);
+            console.log(`📧 [EmailRoutes] Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(parents.length/BATCH_SIZE)} (${batch.length} emails)`);
+
+            const batchPromises = batch.map(async (parent) => {
+                try {
+                    // Gebruik de nieuwe admin bulk template
+                    const emailBodyHtml = generateAdminToAllParentsEmail(
+                        { name: sender.name, email: sender.email, role: sender.role },
+                        mosqueInfo,
+                        subject,
+                        body,
+                        parent.name
+                    );
+
+                    const result = await sendEmail({
+                        to: parent.email,
+                        subject: `Belangrijk bericht van ${mosqueInfo.name}: ${subject}`,
+                        body: emailBodyHtml,
+                        mosqueId: sender.mosque_id,
+                        emailType: 'admin_to_all_parents_bulk',
+                        replyTo: sender.email
+                    });
+
+                    return { success: true, email: parent.email, result };
+                } catch (error) {
+                    console.error(`❌ [EmailRoutes] Failed to send to ${parent.email}:`, error.message);
+                    return { success: false, email: parent.email, error: error.message };
+                }
             });
-        });
 
-        // Verstuur alle emails parallel
-        console.log(`⏳ [EmailRoutes] Sending ${emailPromises.length} bulk emails...`);
-        const results = await Promise.all(emailPromises);
+            const batchResults = await Promise.allSettled(batchPromises);
+            allResults.push(...batchResults);
 
-        const successes = results.filter(r => r && r.success).length;
-        const failures = results.length - successes;
+            // Wacht tussen batches om rate limiting te voorkomen
+            if (i + BATCH_SIZE < parents.length) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+            }
+        }
+
+        const results = allResults;
+
+        // Parse resultaten van Promise.allSettled
+        const successfulResults = results.filter(r => r.status === 'fulfilled' && r.value?.success);
+        const failedResults = results.filter(r => r.status === 'rejected' || !r.value?.success);
+
+        const successes = successfulResults.length;
+        const failures = failedResults.length;
 
         console.log(`✅ [EmailRoutes] Bulk email sending completed: ${successes} success, ${failures} failed`);
 
-        // Log resultaten
-        results.forEach((result, index) => {
-            const parent = parents[index];
-            if (result && result.success) {
-                console.log(`✅ [EmailRoutes] Bulk email sent to ${parent.email} via ${result.service}`);
-            } else {
-                console.error(`❌ [EmailRoutes] Bulk email failed for ${parent.email}:`, result?.error || 'Unknown error');
-            }
-        });
+        // Log alleen samenvattende informatie om rate limiting te voorkomen
+        if (failures > 0) {
+            console.log(`❌ [EmailRoutes] ${failures} emails failed. First few errors:`);
+            failedResults.slice(0, 3).forEach(result => {
+                if (result.status === 'rejected') {
+                    console.error(`❌ Rejected:`, result.reason?.message || result.reason);
+                } else {
+                    console.error(`❌ Failed for ${result.value?.email}:`, result.value?.error);
+                }
+            });
+        }
 
         res.json({
             success: true,
