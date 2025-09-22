@@ -188,9 +188,9 @@ router.post('/send-to-class', async (req, res) => {
 
         console.log(`📤 [EmailRoutes] Preparing to send emails to ${parents.length} parents...`);
 
-        // ✅ FIXED: Verstuur emails met proper error handling in batches
-        const BATCH_SIZE = 5; // Kleinere batches voor klasmail
-        const DELAY_BETWEEN_BATCHES = 500; // 0.5 seconde tussen batches
+        // ✅ FIXED: Verstuur emails met proper error handling in batches om rate limiting te voorkomen
+        const BATCH_SIZE = 3; // Verstuur max 3 emails tegelijk (Resend rate limit)
+        const DELAY_BETWEEN_BATCHES = 2000; // 2 seconden tussen batches
 
         const allResults = [];
 
@@ -268,6 +268,172 @@ router.post('/send-to-class', async (req, res) => {
     } catch (error) {
         console.error('[EmailRoutes] Error in send-to-class:', error);
         sendError(res, 500, 'Onverwachte serverfout bij versturen van bulk-email.', error.message, req);
+    }
+});
+
+// ✅ NIEUWE ENDPOINT: Leraar bericht naar geselecteerde ouders in een klas
+router.post('/send-to-selected-class-parents', async (req, res) => {
+    if (req.user.role !== 'teacher') {
+        return sendError(res, 403, "Alleen leraren mogen deze actie uitvoeren.", null, req);
+    }
+
+    const { classId, subject, body, selectedParentIds } = req.body;
+    const sender = req.user;
+
+    if (!classId || !subject || !body) {
+        return sendError(res, 400, "Klas ID, onderwerp en bericht zijn verplicht.", null, req);
+    }
+
+    if (!selectedParentIds || !Array.isArray(selectedParentIds) || selectedParentIds.length === 0) {
+        return sendError(res, 400, "Selecteer minimaal één ouder.", null, req);
+    }
+
+    try {
+        console.log(`📧 [EmailRoutes] Teacher ${sender.name} sending email to ${selectedParentIds.length} selected parents in class ${classId}`);
+
+        // Stap 1: Controleer of de leraar eigenaar is van de klas
+        const { data: classInfo, error: classError } = await supabase
+            .from('classes')
+            .select('id, name, teacher_id')
+            .eq('id', classId)
+            .single();
+
+        if (classError || !classInfo) {
+            return sendError(res, 404, "Klas niet gevonden.", null, req);
+        }
+
+        if (classInfo.teacher_id !== sender.id) {
+            return sendError(res, 403, "U kunt alleen mailen naar ouders van uw eigen klassen.", null, req);
+        }
+
+        console.log(`✅ [EmailRoutes] Class validation passed: ${classInfo.name}`);
+
+        // Stap 2: Haal alle studenten op die in deze klas zitten
+        const { data: studentsInClass, error: studentsError } = await supabase
+            .from('students')
+            .select('parent_id')
+            .eq('class_id', classId)
+            .eq('active', true);
+
+        if (studentsError) {
+            console.error('[EmailRoutes] Error fetching students:', studentsError);
+            throw studentsError;
+        }
+
+        // Stap 3: Verzamel alle parent_id's die daadwerkelijk in deze klas zitten
+        const classParentIds = [...new Set(studentsInClass.map(s => s.parent_id).filter(Boolean))];
+
+        // Stap 4: Controleer of alle geselecteerde ouders daadwerkelijk bij deze klas horen
+        const validSelectedParentIds = selectedParentIds.filter(id => classParentIds.includes(id));
+
+        if (validSelectedParentIds.length === 0) {
+            return sendError(res, 400, "Geen van de geselecteerde ouders heeft kinderen in deze klas.", null, req);
+        }
+
+        if (validSelectedParentIds.length !== selectedParentIds.length) {
+            console.warn(`⚠️ [EmailRoutes] Filtered ${selectedParentIds.length - validSelectedParentIds.length} invalid parent selections`);
+        }
+
+        // Stap 5: Haal de geselecteerde ouders op
+        const { data: parents, error: parentsError } = await supabase
+            .from('users')
+            .select('id, name, email, first_name, last_name')
+            .in('id', validSelectedParentIds)
+            .eq('role', 'parent');
+
+        if (parentsError) {
+            console.error('[EmailRoutes] Error fetching selected parents:', parentsError);
+            throw parentsError;
+        }
+
+        console.log(`👨‍👩‍👧‍👦 [EmailRoutes] Found ${parents?.length || 0} selected parents in class`);
+
+        if (!parents || parents.length === 0) {
+            return sendError(res, 404, "Geen geselecteerde ouders gevonden.", null, req);
+        }
+
+        console.log(`📤 [EmailRoutes] Preparing to send message to ${parents.length} selected parents in class...`);
+
+        // Stap 6: Verstuur emails in batches om rate limiting te voorkomen
+        const BATCH_SIZE = 3; // Verstuur max 3 emails tegelijk (Resend rate limit)
+        const DELAY_BETWEEN_BATCHES = 2000; // 2 seconden tussen batches
+
+        const allResults = [];
+
+        for (let i = 0; i < parents.length; i += BATCH_SIZE) {
+            const batch = parents.slice(i, i + BATCH_SIZE);
+            console.log(`📧 [EmailRoutes] Processing selected class parents batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(parents.length/BATCH_SIZE)} (${batch.length} emails)`);
+
+            const batchPromises = batch.map(async (parent) => {
+                try {
+                    const emailBodyHtml = generateTeacherToClassEmail(
+                        { name: sender.name, email: sender.email, role: sender.role },
+                        classInfo,
+                        subject,
+                        body,
+                        parent.first_name || parent.name?.split(' ')[0] || parent.name
+                    );
+
+                    const result = await sendEmail({
+                        to: parent.email,
+                        subject: `Bericht voor klas ${classInfo.name}: ${subject}`,
+                        body: emailBodyHtml,
+                        mosqueId: sender.mosque_id,
+                        emailType: 'teacher_to_selected_class_parents_bulk'
+                    });
+
+                    return { success: true, email: parent.email, result };
+                } catch (error) {
+                    console.error(`❌ [EmailRoutes] Failed to send to selected class parent ${parent.email}:`, error.message);
+                    return { success: false, email: parent.email, error: error.message };
+                }
+            });
+
+            const batchResults = await Promise.allSettled(batchPromises);
+            allResults.push(...batchResults);
+
+            if (i + BATCH_SIZE < parents.length) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+            }
+        }
+
+        // Parse resultaten
+        const successfulResults = allResults.filter(r => r.status === 'fulfilled' && r.value?.success);
+        const failedResults = allResults.filter(r => r.status === 'rejected' || !r.value?.success);
+
+        const successes = successfulResults.length;
+        const failures = failedResults.length;
+
+        console.log(`✅ [EmailRoutes] Selected class parents email sending completed: ${successes} success, ${failures} failed`);
+
+        if (failures > 0) {
+            console.log(`❌ [EmailRoutes] ${failures} emails to selected class parents failed. First few errors:`);
+            failedResults.slice(0, 3).forEach(result => {
+                if (result.status === 'rejected') {
+                    console.error(`❌ Rejected:`, result.reason?.message || result.reason);
+                } else {
+                    console.error(`❌ Failed for ${result.value?.email}:`, result.value?.error);
+                }
+            });
+        }
+
+        res.json({
+            success: true,
+            message: `Klasbericht naar geselecteerde ouders voltooid. ${successes} email(s) succesvol verzonden, ${failures} mislukt.`,
+            details: {
+                total_parents: parents.length,
+                emails_sent: successes,
+                emails_failed: failures,
+                class_name: classInfo.name,
+                sent_by: sender.name,
+                selected_count: selectedParentIds.length,
+                valid_selections: validSelectedParentIds.length
+            }
+        });
+
+    } catch (error) {
+        console.error('[EmailRoutes] Error in send-to-selected-class-parents:', error);
+        sendError(res, 500, 'Onverwachte serverfout bij versturen van klasbericht naar geselecteerde ouders.', error.message, req);
     }
 });
 
@@ -480,8 +646,8 @@ router.post('/send-to-all-parents', async (req, res) => {
         console.log(`📤 [EmailRoutes] Preparing to send bulk message to ${parents.length} parents...`);
 
         // Stap 3: Verstuur emails in batches om rate limiting te voorkomen
-        const BATCH_SIZE = 10; // Verstuur max 10 emails tegelijk
-        const DELAY_BETWEEN_BATCHES = 1000; // 1 seconde tussen batches
+        const BATCH_SIZE = 3; // Verstuur max 3 emails tegelijk (Resend rate limit)
+        const DELAY_BETWEEN_BATCHES = 2000; // 2 seconden tussen batches
 
         const allResults = [];
 
@@ -626,9 +792,9 @@ router.post('/send-to-selected-parents', async (req, res) => {
 
         console.log(`📤 [EmailRoutes] Preparing to send message to ${parents.length} selected parents...`);
 
-        // Stap 3: Verstuur emails in batches
-        const BATCH_SIZE = 10;
-        const DELAY_BETWEEN_BATCHES = 1000;
+        // Stap 3: Verstuur emails in batches om rate limiting te voorkomen
+        const BATCH_SIZE = 3; // Verstuur max 3 emails tegelijk (Resend rate limit)
+        const DELAY_BETWEEN_BATCHES = 2000; // 2 seconden tussen batches
 
         const allResults = [];
 
