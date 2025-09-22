@@ -567,6 +567,149 @@ router.post('/send-to-all-parents', async (req, res) => {
     }
 });
 
+// ✅ NIEUWE ENDPOINT: Admin bericht naar geselecteerde ouders
+router.post('/send-to-selected-parents', async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins mogen berichten naar ouders sturen.", null, req);
+    }
+
+    const { subject, body, selectedParentIds } = req.body;
+    const sender = req.user;
+
+    if (!subject || !body) {
+        return sendError(res, 400, "Onderwerp en bericht zijn verplicht.", null, req);
+    }
+
+    if (!selectedParentIds || !Array.isArray(selectedParentIds) || selectedParentIds.length === 0) {
+        return sendError(res, 400, "Selecteer minimaal één ouder.", null, req);
+    }
+
+    try {
+        console.log(`📧 [EmailRoutes] Admin ${sender.name} sending message to ${selectedParentIds.length} selected parents`);
+
+        // Stap 1: Haal mosque informatie op
+        const { data: mosqueInfo, error: mosqueError } = await supabase
+            .from('mosques')
+            .select('id, name, subdomain')
+            .eq('id', sender.mosque_id)
+            .single();
+
+        if (mosqueError || !mosqueInfo) {
+            return sendError(res, 404, "Moskee informatie niet gevonden.", null, req);
+        }
+
+        console.log(`✅ [EmailRoutes] Mosque validation passed: ${mosqueInfo.name}`);
+
+        // Stap 2: Haal geselecteerde ouders op
+        const { data: parents, error: parentsError } = await supabase
+            .from('users')
+            .select('id, name, email, first_name, last_name')
+            .eq('mosque_id', sender.mosque_id)
+            .eq('role', 'parent')
+            .in('id', selectedParentIds);
+
+        if (parentsError) {
+            console.error('[EmailRoutes] Error fetching selected parents:', parentsError);
+            throw parentsError;
+        }
+
+        console.log(`👨‍👩‍👧‍👦 [EmailRoutes] Found ${parents?.length || 0} selected parents`);
+
+        if (!parents || parents.length === 0) {
+            return sendError(res, 404, "Geen geselecteerde ouders gevonden.", null, req);
+        }
+
+        // Controleer of alle geselecteerde ouders gevonden zijn
+        if (parents.length !== selectedParentIds.length) {
+            console.warn(`⚠️ [EmailRoutes] Only found ${parents.length} out of ${selectedParentIds.length} selected parents`);
+        }
+
+        console.log(`📤 [EmailRoutes] Preparing to send message to ${parents.length} selected parents...`);
+
+        // Stap 3: Verstuur emails in batches
+        const BATCH_SIZE = 10;
+        const DELAY_BETWEEN_BATCHES = 1000;
+
+        const allResults = [];
+
+        for (let i = 0; i < parents.length; i += BATCH_SIZE) {
+            const batch = parents.slice(i, i + BATCH_SIZE);
+            console.log(`📧 [EmailRoutes] Processing selected parents batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(parents.length/BATCH_SIZE)} (${batch.length} emails)`);
+
+            const batchPromises = batch.map(async (parent) => {
+                try {
+                    const emailBodyHtml = generateAdminToAllParentsEmail(
+                        { name: sender.name, email: sender.email, role: sender.role },
+                        mosqueInfo,
+                        subject,
+                        body,
+                        parent.first_name || parent.name?.split(' ')[0] || parent.name
+                    );
+
+                    const result = await sendEmail({
+                        to: parent.email,
+                        subject: `Belangrijk bericht van ${mosqueInfo.name}: ${subject}`,
+                        body: emailBodyHtml,
+                        mosqueId: sender.mosque_id,
+                        emailType: 'admin_to_selected_parents_bulk',
+                        replyTo: 'onderwijs@al-hijra.nl'
+                    });
+
+                    return { success: true, email: parent.email, result };
+                } catch (error) {
+                    console.error(`❌ [EmailRoutes] Failed to send to selected parent ${parent.email}:`, error.message);
+                    return { success: false, email: parent.email, error: error.message };
+                }
+            });
+
+            const batchResults = await Promise.allSettled(batchPromises);
+            allResults.push(...batchResults);
+
+            if (i + BATCH_SIZE < parents.length) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+            }
+        }
+
+        // Parse resultaten
+        const successfulResults = allResults.filter(r => r.status === 'fulfilled' && r.value?.success);
+        const failedResults = allResults.filter(r => r.status === 'rejected' || !r.value?.success);
+
+        const successes = successfulResults.length;
+        const failures = failedResults.length;
+
+        console.log(`✅ [EmailRoutes] Selected parents email sending completed: ${successes} success, ${failures} failed`);
+
+        if (failures > 0) {
+            console.log(`❌ [EmailRoutes] ${failures} emails to selected parents failed. First few errors:`);
+            failedResults.slice(0, 3).forEach(result => {
+                if (result.status === 'rejected') {
+                    console.error(`❌ Rejected:`, result.reason?.message || result.reason);
+                } else {
+                    console.error(`❌ Failed for ${result.value?.email}:`, result.value?.error);
+                }
+            });
+        }
+
+        res.json({
+            success: true,
+            message: `Bulk bericht naar geselecteerde ouders voltooid. ${successes} email(s) succesvol verzonden, ${failures} mislukt.`,
+            details: {
+                total_parents: parents.length,
+                emails_sent: successes,
+                emails_failed: failures,
+                mosque_name: mosqueInfo.name,
+                subject: subject,
+                sent_by: sender.name,
+                selected_count: selectedParentIds.length
+            }
+        });
+
+    } catch (error) {
+        console.error('[EmailRoutes] Error in send-to-selected-parents:', error);
+        sendError(res, 500, 'Onverwachte serverfout bij versturen van bulk-email naar geselecteerde ouders.', error.message, req);
+    }
+});
+
 // ✅ SIMPLIFIED: Test endpoint voor email functionaliteit
 router.post('/test-simple', async (req, res) => {
     try {
