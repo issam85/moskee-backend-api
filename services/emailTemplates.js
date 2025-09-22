@@ -261,8 +261,8 @@ const generateAdminToAllParentsEmail = (adminInfo, mosqueInfo, subject, body, pa
             <!-- Moskee Info -->
             <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 12px; padding: 24px; margin: 24px 0;">
                 <div style="text-align: center;">
-                    <h3 style="color: #991b1b; margin: 0 0 8px 0; font-size: 20px;">🕌 ${mosqueInfo.name || 'Al-Hijra Onderwijs'}</h3>
-                    <p style="color: #b91c1c; margin: 0; font-size: 16px;">Bericht van: <strong>${adminInfo.name}</strong></p>
+                    <h3 style="color: #991b1b; margin: 0 0 8px 0; font-size: 20px;">🕌 Onderwijs Al-Hijra</h3>
+                    <p style="color: #b91c1c; margin: 0; font-size: 16px;">Bericht van: <strong>Onderwijs Al-Hijra</strong></p>
                     <p style="color: #dc2626; margin: 8px 0 0 0; font-size: 14px;">Beste ${parentName || 'ouders/verzorgers'},</p>
                 </div>
             </div>
@@ -285,11 +285,10 @@ const generateAdminToAllParentsEmail = (adminInfo, mosqueInfo, subject, body, pa
             <div style="background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 20px; margin: 24px 0;">
                 <h3 style="color: #047857; margin: 0 0 12px 0; font-size: 16px;">📞 Contact & Vragen:</h3>
                 <p style="color: #065f46; margin: 0; font-size: 14px; line-height: 1.5;">
-                    Voor vragen of opmerkingen kunt u contact opnemen met ${mosqueInfo.name || 'de school'}
-                    of rechtstreeks reageren op deze email naar ${adminInfo.name}.
+                    Voor vragen of opmerkingen kunt u contact opnemen met Al-Hijra Vlaardingen.
                 </p>
                 <p style="color: #065f46; margin: 8px 0 0 0; font-size: 14px;">
-                    📧 <strong>Email:</strong> ${adminInfo.email}
+                    📧 <strong>Email:</strong> onderwijs@al-hijra.nl
                 </p>
             </div>
 

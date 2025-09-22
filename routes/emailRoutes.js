@@ -481,7 +481,7 @@ router.post('/send-to-all-parents', async (req, res) => {
                         body: emailBodyHtml,
                         mosqueId: sender.mosque_id,
                         emailType: 'admin_to_all_parents_bulk',
-                        replyTo: sender.email
+                        replyTo: 'onderwijs@al-hijra.nl'
                     });
 
                     return { success: true, email: parent.email, result };
