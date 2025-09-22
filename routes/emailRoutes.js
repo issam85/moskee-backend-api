@@ -9,7 +9,8 @@ const {
     generateParentToTeacherEmail,
     generateTeacherToParentEmail,
     generateTeacherToClassEmail,
-    generateGenericEmail
+    generateGenericEmail,
+    generateAdminToAllParentsEmail
 } = require('../services/emailTemplates');
 
 // POST send a generic email from logged-in user to any recipient
@@ -401,6 +402,116 @@ router.get('/stats/mosque/:mosqueId', async (req, res) => {
 
     } catch (error) {
         sendError(res, 500, 'Fout bij ophalen email statistieken.', error.message, req);
+    }
+});
+
+// ✅ NIEUWE ENDPOINT: Admin bericht naar alle ouders (bulk)
+router.post('/send-to-all-parents', async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins mogen berichten naar alle ouders sturen.", null, req);
+    }
+
+    const { subject, body } = req.body;
+    const sender = req.user;
+
+    if (!subject || !body) {
+        return sendError(res, 400, "Onderwerp en bericht zijn verplicht.", null, req);
+    }
+
+    try {
+        console.log(`📧 [EmailRoutes] Admin ${sender.name} sending bulk message to all parents in mosque ${sender.mosque_id}`);
+
+        // Stap 1: Haal mosque informatie op
+        const { data: mosqueInfo, error: mosqueError } = await supabase
+            .from('mosques')
+            .select('id, name, subdomain')
+            .eq('id', sender.mosque_id)
+            .single();
+
+        if (mosqueError || !mosqueInfo) {
+            return sendError(res, 404, "Moskee informatie niet gevonden.", null, req);
+        }
+
+        console.log(`✅ [EmailRoutes] Mosque validation passed: ${mosqueInfo.name}`);
+
+        // Stap 2: Haal alle ouders op van deze moskee
+        const { data: parents, error: parentsError } = await supabase
+            .from('users')
+            .select('id, name, email')
+            .eq('mosque_id', sender.mosque_id)
+            .eq('role', 'parent');
+
+        if (parentsError) {
+            console.error('[EmailRoutes] Error fetching parents:', parentsError);
+            throw parentsError;
+        }
+
+        console.log(`👨‍👩‍👧‍👦 [EmailRoutes] Found ${parents?.length || 0} parents in mosque`);
+
+        if (!parents || parents.length === 0) {
+            return sendError(res, 404, "Geen ouders gevonden in deze moskee.", null, req);
+        }
+
+        console.log(`📤 [EmailRoutes] Preparing to send bulk message to ${parents.length} parents...`);
+
+        // Stap 3: Verstuur email naar alle ouders
+        const emailPromises = parents.map(parent => {
+            console.log(`📧 [EmailRoutes] Queueing bulk email for parent: ${parent.name} (${parent.email})`);
+
+            // Gebruik de nieuwe admin bulk template
+            const emailBodyHtml = generateAdminToAllParentsEmail(
+                { name: sender.name, email: sender.email, role: sender.role },
+                mosqueInfo,
+                subject,
+                body,
+                parent.name
+            );
+
+            return sendEmail({
+                to: parent.email,
+                subject: `Belangrijk bericht van ${mosqueInfo.name}: ${subject}`,
+                body: emailBodyHtml,
+                mosqueId: sender.mosque_id,
+                emailType: 'admin_to_all_parents_bulk',
+                replyTo: sender.email // Ouders kunnen direct reageren naar admin
+            });
+        });
+
+        // Verstuur alle emails parallel
+        console.log(`⏳ [EmailRoutes] Sending ${emailPromises.length} bulk emails...`);
+        const results = await Promise.all(emailPromises);
+
+        const successes = results.filter(r => r && r.success).length;
+        const failures = results.length - successes;
+
+        console.log(`✅ [EmailRoutes] Bulk email sending completed: ${successes} success, ${failures} failed`);
+
+        // Log resultaten
+        results.forEach((result, index) => {
+            const parent = parents[index];
+            if (result && result.success) {
+                console.log(`✅ [EmailRoutes] Bulk email sent to ${parent.email} via ${result.service}`);
+            } else {
+                console.error(`❌ [EmailRoutes] Bulk email failed for ${parent.email}:`, result?.error || 'Unknown error');
+            }
+        });
+
+        res.json({
+            success: true,
+            message: `Bulk bericht verstuur-opdracht voltooid. ${successes} email(s) succesvol verzonden naar ouders, ${failures} mislukt.`,
+            details: {
+                total_parents: parents.length,
+                emails_sent: successes,
+                emails_failed: failures,
+                mosque_name: mosqueInfo.name,
+                subject: subject,
+                sent_by: sender.name
+            }
+        });
+
+    } catch (error) {
+        console.error('[EmailRoutes] Error in send-to-all-parents:', error);
+        sendError(res, 500, 'Onverwachte serverfout bij versturen van bulk-email naar alle ouders.', error.message, req);
     }
 });
 
