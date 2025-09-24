@@ -626,6 +626,8 @@ router.get('/parent/my-payments', async (req, res) => {
     }
 
     try {
+        console.log(`[Parent Payments DEBUG] Request from parent ID: ${req.user.id}, name: ${req.user.name}, email: ${req.user.email}, mosque: ${req.user.mosque_id}`);
+
         const { data, error } = await supabase
             .from('payments')
             .select('id, amount, payment_method, payment_date, description, notes, created_at')
@@ -633,9 +635,14 @@ router.get('/parent/my-payments', async (req, res) => {
             .eq('mosque_id', req.user.mosque_id)
             .order('payment_date', { ascending: false });
 
-        if (error) throw error;
+        if (error) {
+            console.error(`[Parent Payments ERROR] Database error for parent ${req.user.id}:`, error);
+            throw error;
+        }
 
-        console.log(`[Parent Payments] Retrieved ${data.length} payments for parent ${req.user.name} (${req.user.email})`);
+        console.log(`[Parent Payments DEBUG] Retrieved ${data.length} payments for parent ${req.user.name} (${req.user.email})`);
+        console.log(`[Parent Payments DEBUG] Payments data:`, JSON.stringify(data, null, 2));
+
         res.json(data);
     } catch (error) {
         console.error('Error fetching parent payments:', error);
