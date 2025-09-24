@@ -636,7 +636,7 @@ router.get('/parent/my-payments', async (req, res) => {
 
         const { data, error } = await supabase
             .from('payments')
-            .select('id, amount, payment_method, payment_date, description, notes, created_at')
+            .select('id, parent_id, amount, payment_method, payment_date, description, notes, created_at')
             .eq('parent_id', req.user.id)
             .eq('mosque_id', req.user.mosque_id)
             .order('payment_date', { ascending: false });
