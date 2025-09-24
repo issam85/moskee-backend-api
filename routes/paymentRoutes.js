@@ -619,6 +619,12 @@ router.get('/mosque/:mosqueId', async (req, res) => {
     }
 });
 
+// ✅ DEBUG TEST ROUTE: Simple parent test
+router.get('/parent/test', async (req, res) => {
+    console.log(`[Parent Test] Route hit by user: ${req.user?.id}, role: ${req.user?.role}, name: ${req.user?.name}`);
+    res.json({ message: 'Parent test route working', user: req.user?.id, role: req.user?.role });
+});
+
 // ✅ NIEUWE ROUTE: GET payments for a specific parent (ouders kunnen hun eigen betalingen bekijken)
 router.get('/parent/my-payments', async (req, res) => {
     if (req.user.role !== 'parent') {
