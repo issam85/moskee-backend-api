@@ -597,12 +597,12 @@ router.get('/stripe/session/:sessionId', async (req, res) => {
 
 // === Manual Payment Routes (voor admins) ===
 
-// GET all payments for a mosque
+// GET all payments for a mosque (admin only)
 router.get('/mosque/:mosqueId', async (req, res) => {
     if (req.user.role !== 'admin' || req.user.mosque_id !== req.params.mosqueId) {
         return sendError(res, 403, "Niet geautoriseerd.", null, req);
     }
-    
+
     try {
         const { data, error } = await supabase
             .from('payments')
@@ -610,12 +610,36 @@ router.get('/mosque/:mosqueId', async (req, res) => {
             .select('*, parent:parent_id(name, email), processed_by_user:processed_by(name)')
             .eq('mosque_id', req.params.mosqueId)
             .order('payment_date', { ascending: false });
-            
+
         if (error) throw error;
-        
+
         res.json(data);
     } catch (error) {
         sendError(res, 500, 'Fout bij ophalen betalingen.', error.message, req);
+    }
+});
+
+// ✅ NIEUWE ROUTE: GET payments for a specific parent (ouders kunnen hun eigen betalingen bekijken)
+router.get('/parent/my-payments', async (req, res) => {
+    if (req.user.role !== 'parent') {
+        return sendError(res, 403, "Alleen ouders kunnen deze route gebruiken.", null, req);
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('payments')
+            .select('id, amount, payment_method, payment_date, description, notes, created_at')
+            .eq('parent_id', req.user.id)
+            .eq('mosque_id', req.user.mosque_id)
+            .order('payment_date', { ascending: false });
+
+        if (error) throw error;
+
+        console.log(`[Parent Payments] Retrieved ${data.length} payments for parent ${req.user.name} (${req.user.email})`);
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching parent payments:', error);
+        sendError(res, 500, 'Fout bij ophalen van uw betalingen.', error.message, req);
     }
 });
 
