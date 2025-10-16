@@ -14,7 +14,7 @@ router.get('/mosque/:mosqueId', async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('students')
-            .select('*, parent:parent_id(id, name, email), class:class_id(id, name)')
+            .select('*, parent:parent_id(id, name, email, phone), class:class_id(id, name)')
             .eq('mosque_id', req.params.mosqueId)
             .order('name', { ascending: true });
         if (error) throw error;
