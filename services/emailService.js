@@ -95,9 +95,9 @@ const sendEmailViaResend = async (emailDetails) => {
         
         // Voeg reply-to toe indien aanwezig
         if (replyTo) {
-            emailPayload.reply_to = replyTo;
+            emailPayload.reply_to = replyTo;  // Resend API gebruikt reply_to (underscore)
         }
-        
+
         console.log(`📧 [RESEND] Email payload prepared:`);
         console.log(`📧 [RESEND] - From: ${emailPayload.from}`);
         console.log(`📧 [RESEND] - To: ${emailPayload.to}`);
@@ -187,7 +187,7 @@ const sendEmailViaResend = async (emailDetails) => {
 
 // ✅ M365 EMAIL FUNCTIE (bestaand, voor moskee-specifieke emails)
 const sendM365EmailInternal = async (emailDetails) => {
-    const { to, subject, body, mosqueId, emailType = 'm365_app_email' } = emailDetails;
+    const { to, subject, body, mosqueId, emailType = 'm365_app_email', replyTo = null } = emailDetails;
     console.log(`[M365 EMAIL] Sending ${emailType} to: ${to} for mosqueId: ${mosqueId}`);
 
     if (!to || !subject || !body || !mosqueId) {
@@ -242,9 +242,19 @@ const sendM365EmailInternal = async (emailDetails) => {
     
     const sendMailUrl = `https://graph.microsoft.com/v1.0/users/${mosqueConfig.m365_sender_email}/sendMail`;
     const emailPayloadGraph = {
-        message: { subject, body: { contentType: 'HTML', content: body }, toRecipients: [{ emailAddress: { address: to } }] },
+        message: {
+            subject,
+            body: { contentType: 'HTML', content: body },
+            toRecipients: [{ emailAddress: { address: to } }]
+        },
         saveToSentItems: 'true'
     };
+
+    // Voeg reply-to toe indien aanwezig (voor Microsoft Graph API)
+    if (replyTo) {
+        emailPayloadGraph.message.replyTo = [{ emailAddress: { address: replyTo } }];
+        console.log(`[M365 EMAIL] Reply-To set to: ${replyTo}`);
+    }
 
     try {
         const emailApiResponse = await axios.post(sendMailUrl, emailPayloadGraph, { headers: { Authorization: `Bearer ${accessToken}` } });
