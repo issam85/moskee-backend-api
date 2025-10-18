@@ -83,8 +83,7 @@ const generateTeacherToParentEmail = (teacherInfo, parentInfo, subject, body, st
             <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 20px; margin: 24px 0;">
                 <h3 style="color: #0369a1; margin: 0 0 12px 0; font-size: 16px;">↩️ Reageren:</h3>
                 <p style="color: #075985; margin: 0; font-size: 14px; line-height: 1.5;">
-                    U kunt direct op deze email reageren om de leraar te antwoorden. 
-                    Uw antwoord wordt automatisch naar ${teacherInfo.name} gestuurd.
+                    Voor vragen of een reactie kunt u een e-mail sturen naar onderwijs@al-hijra.nl
                 </p>
             </div>
             
@@ -145,8 +144,7 @@ const generateTeacherToClassEmail = (teacherInfo, classInfo, subject, body, pare
             <div style="background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 20px; margin: 24px 0;">
                 <h3 style="color: #047857; margin: 0 0 12px 0; font-size: 16px;">↩️ Vragen of opmerkingen?</h3>
                 <p style="color: #065f46; margin: 0; font-size: 14px; line-height: 1.5;">
-                    U kunt direct op deze email reageren om ${teacherInfo.name} een persoonlijk bericht te sturen. 
-                    Uw antwoord wordt alleen naar de leraar gestuurd.
+                    Voor vragen of een reactie kunt u een e-mail sturen naar onderwijs@al-hijra.nl
                 </p>
             </div>
             
@@ -224,7 +222,7 @@ const generateGenericEmail = (senderInfo, recipientInfo, subject, body, emailCon
             <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 20px; margin: 24px 0;">
                 <h3 style="color: #0369a1; margin: 0 0 12px 0; font-size: 16px;">↩️ Reageren:</h3>
                 <p style="color: #075985; margin: 0; font-size: 14px; line-height: 1.5;">
-                    U kunt direct op deze email reageren om ${senderInfo.name} te antwoorden.
+                    Voor vragen of een reactie kunt u een e-mail sturen naar onderwijs@al-hijra.nl
                 </p>
             </div>
             
