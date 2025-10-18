@@ -49,6 +49,11 @@ router.post('/send-generic', async (req, res) => {
         if (sender.role === 'parent' && recipientInfo.role === 'teacher') emailContext = 'parent_to_teacher';
         if (sender.role === 'teacher' && recipientInfo.role === 'parent') emailContext = 'teacher_to_parent';
 
+        // ✅ Voor admin gebruikers: gebruik vaste afzender naam
+        const senderInfo = sender.role === 'admin'
+            ? { name: 'Onderwijs Al-Hijra', email: 'onderwijs@al-hijra.nl', role: sender.role }
+            : { name: sender.name, email: sender.email, role: sender.role };
+
         // ✅ FIXED: ALLEEN de template logica - geen hardcoded HTML meer!
         let emailBodyHtml;
         if (emailContext === 'parent_to_teacher') {
@@ -71,7 +76,7 @@ router.post('/send-generic', async (req, res) => {
             }
 
             emailBodyHtml = generateParentToTeacherEmail(
-                { name: sender.name, email: sender.email, role: sender.role },
+                senderInfo,
                 recipientInfo,
                 subject,
                 body,
@@ -79,14 +84,14 @@ router.post('/send-generic', async (req, res) => {
             );
         } else if (emailContext === 'teacher_to_parent') {
             emailBodyHtml = generateTeacherToParentEmail(
-                { name: sender.name, email: sender.email, role: sender.role },
+                senderInfo,
                 recipientInfo,
                 subject,
                 body
             );
         } else {
             emailBodyHtml = generateGenericEmail(
-                { name: sender.name, email: sender.email, role: sender.role },
+                senderInfo,
                 recipientInfo,
                 subject,
                 body,
@@ -100,8 +105,10 @@ router.post('/send-generic', async (req, res) => {
             body: emailBodyHtml,
             mosqueId: sender.mosque_id,
             emailType: `generic_${sender.role}`,
-            // ✅ FIX: Add reply-to header for parent emails so teachers can reply directly
-            replyTo: emailContext === 'parent_to_teacher' ? sender.email : null
+            // ✅ FIX: Add reply-to header
+            replyTo: emailContext === 'parent_to_teacher'
+                ? sender.email
+                : (sender.role === 'admin' ? 'onderwijs@al-hijra.nl' : null)
         };
 
         const emailResult = await sendEmail(emailDetails);
@@ -657,9 +664,9 @@ router.post('/send-to-all-parents', async (req, res) => {
 
             const batchPromises = batch.map(async (parent) => {
                 try {
-                    // Gebruik de nieuwe admin bulk template
+                    // Gebruik de nieuwe admin bulk template met vaste afzender naam
                     const emailBodyHtml = generateAdminToAllParentsEmail(
-                        { name: sender.name, email: sender.email, role: sender.role },
+                        { name: 'Onderwijs Al-Hijra', email: 'onderwijs@al-hijra.nl', role: sender.role },
                         mosqueInfo,
                         subject,
                         body,
@@ -805,7 +812,7 @@ router.post('/send-to-selected-parents', async (req, res) => {
             const batchPromises = batch.map(async (parent) => {
                 try {
                     const emailBodyHtml = generateAdminToAllParentsEmail(
-                        { name: sender.name, email: sender.email, role: sender.role },
+                        { name: 'Onderwijs Al-Hijra', email: 'onderwijs@al-hijra.nl', role: sender.role },
                         mosqueInfo,
                         subject,
                         body,
@@ -984,9 +991,9 @@ router.post('/send-bulk-teachers', async (req, res) => {
 
             const batchPromises = batch.map(async (teacher) => {
                 try {
-                    // Use generic email template for admin to teachers
+                    // Use generic email template for admin to teachers met vaste afzender naam
                     const emailBodyHtml = generateGenericEmail(
-                        { name: sender.name, email: sender.email, role: sender.role },
+                        { name: 'Onderwijs Al-Hijra', email: 'onderwijs@al-hijra.nl', role: sender.role },
                         { name: teacher.name, email: teacher.email, role: 'teacher' },
                         subject,
                         body,
