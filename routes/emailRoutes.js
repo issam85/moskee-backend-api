@@ -918,4 +918,146 @@ router.post('/test-simple', async (req, res) => {
     }
 });
 
+// POST /api/email/send-bulk-teachers - Send bulk message to selected teachers
+router.post('/send-bulk-teachers', async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins mogen berichten naar leraren sturen.", null, req);
+    }
+
+    const { teacherIds, subject, body } = req.body;
+    const sender = req.user;
+
+    if (!subject || !body) {
+        return sendError(res, 400, "Onderwerp en bericht zijn verplicht.", null, req);
+    }
+
+    if (!teacherIds || !Array.isArray(teacherIds) || teacherIds.length === 0) {
+        return sendError(res, 400, "Selecteer minimaal één leraar.", null, req);
+    }
+
+    try {
+        console.log(`📧 [EmailRoutes] Admin ${sender.name} sending bulk message to ${teacherIds.length} teachers`);
+
+        // Stap 1: Haal mosque informatie op
+        const { data: mosqueInfo, error: mosqueError } = await supabase
+            .from('mosques')
+            .select('id, name, subdomain')
+            .eq('id', sender.mosque_id)
+            .single();
+
+        if (mosqueError || !mosqueInfo) {
+            return sendError(res, 404, "Moskee informatie niet gevonden.", null, req);
+        }
+
+        console.log(`✅ [EmailRoutes] Mosque validation passed: ${mosqueInfo.name}`);
+
+        // Stap 2: Haal geselecteerde leraren op
+        const { data: teachers, error: teachersError } = await supabase
+            .from('users')
+            .select('id, name, email')
+            .eq('mosque_id', sender.mosque_id)
+            .eq('role', 'teacher')
+            .in('id', teacherIds);
+
+        if (teachersError) {
+            console.error('[EmailRoutes] Error fetching teachers:', teachersError);
+            throw teachersError;
+        }
+
+        console.log(`👨‍🏫 [EmailRoutes] Found ${teachers?.length || 0} teachers to send to`);
+
+        if (!teachers || teachers.length === 0) {
+            return sendError(res, 404, "Geen leraren gevonden met de opgegeven IDs.", null, req);
+        }
+
+        console.log(`📤 [EmailRoutes] Preparing to send bulk message to ${teachers.length} teachers...`);
+
+        // Stap 3: Verstuur emails in batches om rate limiting te voorkomen
+        const BATCH_SIZE = 3; // Verstuur max 3 emails tegelijk (Resend rate limit)
+        const DELAY_BETWEEN_BATCHES = 2000; // 2 seconden tussen batches
+
+        const allResults = [];
+
+        for (let i = 0; i < teachers.length; i += BATCH_SIZE) {
+            const batch = teachers.slice(i, i + BATCH_SIZE);
+            console.log(`📧 [EmailRoutes] Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(teachers.length/BATCH_SIZE)} (${batch.length} emails)`);
+
+            const batchPromises = batch.map(async (teacher) => {
+                try {
+                    // Use generic email template for admin to teachers
+                    const emailBodyHtml = generateGenericEmail(
+                        { name: sender.name, email: sender.email, role: sender.role },
+                        { name: teacher.name, email: teacher.email, role: 'teacher' },
+                        subject,
+                        body,
+                        'admin'
+                    );
+
+                    const result = await sendEmail({
+                        to: teacher.email,
+                        subject: `Bericht van ${mosqueInfo.name}: ${subject}`,
+                        body: emailBodyHtml,
+                        mosqueId: sender.mosque_id,
+                        emailType: 'admin_to_teachers_bulk',
+                        replyTo: 'onderwijs@al-hijra.nl'
+                    });
+
+                    return { success: true, email: teacher.email, result };
+                } catch (error) {
+                    console.error(`❌ [EmailRoutes] Failed to send to ${teacher.email}:`, error.message);
+                    return { success: false, email: teacher.email, error: error.message };
+                }
+            });
+
+            const batchResults = await Promise.allSettled(batchPromises);
+            allResults.push(...batchResults);
+
+            // Wacht tussen batches om rate limiting te voorkomen
+            if (i + BATCH_SIZE < teachers.length) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+            }
+        }
+
+        const results = allResults;
+
+        // Parse resultaten van Promise.allSettled
+        const successfulResults = results.filter(r => r.status === 'fulfilled' && r.value?.success);
+        const failedResults = results.filter(r => r.status === 'rejected' || !r.value?.success);
+
+        const successes = successfulResults.length;
+        const failures = failedResults.length;
+
+        console.log(`✅ [EmailRoutes] Bulk email sending completed: ${successes} success, ${failures} failed`);
+
+        // Log alleen samenvattende informatie
+        if (failures > 0) {
+            console.log(`❌ [EmailRoutes] ${failures} emails failed. First few errors:`);
+            failedResults.slice(0, 3).forEach(result => {
+                if (result.status === 'rejected') {
+                    console.error(`❌ Rejected:`, result.reason?.message || result.reason);
+                } else {
+                    console.error(`❌ Failed for ${result.value?.email}:`, result.value?.error);
+                }
+            });
+        }
+
+        res.json({
+            success: true,
+            message: `Bulk bericht verstuur-opdracht voltooid. ${successes} email(s) succesvol verzonden naar leraren, ${failures} mislukt.`,
+            details: {
+                total_teachers: teachers.length,
+                emails_sent: successes,
+                emails_failed: failures,
+                mosque_name: mosqueInfo.name,
+                subject: subject,
+                sent_by: sender.name
+            }
+        });
+
+    } catch (error) {
+        console.error('[EmailRoutes] Error in send-bulk-teachers:', error);
+        return sendError(res, 500, "Fout bij versturen bulk bericht naar leraren.", error.message, req);
+    }
+});
+
 module.exports = router;
