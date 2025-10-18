@@ -58,8 +58,9 @@ router.get('/:lessonId/details-for-attendance', async (req, res) => {
 
 // POST (create) a new lesson for a class
 router.post('/', async (req, res) => {
-    const { mosque_id, klas_id, les_datum, onderwerp } = req.body;
-    if (!mosque_id || !klas_id || !les_datum) return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
+    const { mosque_id, moskee_id, klas_id, les_datum, onderwerp } = req.body;
+    const mosqueId = mosque_id || moskee_id; // Accept both English and Dutch field names
+    if (!mosqueId || !klas_id || !les_datum) return sendError(res, 400, "Verplichte velden ontbreken.", null, req);
     try {
         const { data: classInfo, error: classError } = await supabase.from('classes').select('mosque_id, teacher_id').eq('id', klas_id).single();
         if (classError || !classInfo) return sendError(res, 404, 'Klas niet gevonden.', null, req);
@@ -71,12 +72,12 @@ router.post('/', async (req, res) => {
         const { data: existingLesson } = await supabase.from('lessen').select('id').eq('klas_id', klas_id).eq('les_datum', les_datum).maybeSingle();
         if (existingLesson) return sendError(res, 409, `Er bestaat al een les voor deze klas op ${les_datum}.`, null, req);
 
-        const lesData = { 
-            ...req.body, 
-            moskee_id: req.body.mosque_id, // Map English field name to Dutch database field
-            les_dag_van_week: new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' }) 
+        const lesData = {
+            ...req.body,
+            moskee_id: mosqueId, // Use the validated mosque ID
+            les_dag_van_week: new Date(les_datum).toLocaleDateString('nl-NL', { weekday: 'long' })
         };
-        delete lesData.mosque_id; // Remove the English field name
+        delete lesData.mosque_id; // Remove the English field name if present
         const { data: newLesson, error } = await supabase.from('lessen').insert(lesData).select().single();
         if (error) throw error;
         res.status(201).json({ success: true, message: 'Les aangemaakt.', data: newLesson });
