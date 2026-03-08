@@ -76,15 +76,15 @@ router.get('/*', async (req, res) => {
   }
 });
 
-// Proxy PUT requests: /api/eboekhouden/:path*
-router.put('/*', async (req, res) => {
+// Proxy PATCH requests: /api/eboekhouden/:path*
+router.patch('/*', async (req, res) => {
   try {
     let token = await getToken();
     const path = '/' + req.params[0];
     const url = `${BASE_URL}${path}`;
 
     let response = await fetch(url, {
-      method: 'PUT',
+      method: 'PATCH',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body),
     });
@@ -94,7 +94,7 @@ router.put('/*', async (req, res) => {
       cachedToken = null; tokenExpiry = 0;
       token = await getToken();
       response = await fetch(url, {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body),
       });
