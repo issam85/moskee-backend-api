@@ -24,6 +24,7 @@ const quranRoutes = require('./routes/quranRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const debugRoutes = require('./routes/debugRoutes');
 const trialRoutes = require('./routes/trialRoutes'); // ✅ ADD THIS LINE
+const eboekhoudenRoutes = require('./routes/eboekhoudenRoutes');
 const { handleStripeWebhook } = require('./services/stripeService');
 require('./jobs/sessionRetryJob');
 console.log('✅ Session retry cron job initialized');
@@ -39,6 +40,9 @@ const corsOptions = {
       'https://mijnlvs.nl',
       'https://www.mijnlvs.nl',
       'https://al-hijra.mijnlvs.nl',
+      'https://al-hijra.nl',
+      'https://www.al-hijra.nl',
+      'https://dashboard.al-hijra.nl',
     ];
     const allowedOriginPatterns = [
       /^https:\/\/[a-z0-9-]+\.mijnlvs\.nl$/,
@@ -75,6 +79,7 @@ app.use('/api/debug', debugRoutes);
 // --- Route Setup ---
 // 1. Publieke routes (geen authenticatie nodig)
 app.use('/api', authRoutes); // Handelt /api/auth/login en /api/mosques/register af
+app.use('/api/eboekhouden', eboekhoudenRoutes); // eBoekhouden proxy (server-to-server)
 
 // 2. Beveiligde routes (authenticatie vereist)
 app.use(authMiddleware); // Authenticatie middleware
