@@ -76,4 +76,40 @@ router.get('/*', async (req, res) => {
   }
 });
 
+// Proxy PUT requests: /api/eboekhouden/:path*
+router.put('/*', async (req, res) => {
+  try {
+    let token = await getToken();
+    const path = '/' + req.params[0];
+    const url = `${BASE_URL}${path}`;
+
+    let response = await fetch(url, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+
+    // Token verlopen → reset en retry
+    if (response.status === 401) {
+      cachedToken = null; tokenExpiry = 0;
+      token = await getToken();
+      response = await fetch(url, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(response.status).json({ error: `eBoekhouden fout ${response.status}: ${text}` });
+    }
+
+    const text = await response.text();
+    res.json(text ? JSON.parse(text) : { ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
