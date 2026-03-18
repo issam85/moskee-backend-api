@@ -93,7 +93,7 @@ router.post('/', async (req, res) => {
             if (authError.message.includes('User already registered')) {
                 return sendError(res, 409, `Email ${normalizedEmail} is al geregistreerd.`, null, req);
             }
-            return sendError(res, 500, `Fout bij aanmaken auth user: ${authError.message}`, authError, req);
+            return sendError(res, 500, 'Fout bij aanmaken auth user.', authError, req);
         }
 
         // Create app user record
@@ -146,7 +146,7 @@ router.post('/', async (req, res) => {
 
     } catch (error) {
         const isDuplicateError = error.code === '23505' || (error.message && error.message.includes('duplicate key'));
-        sendError(res, isDuplicateError ? 409 : 500, error.message, error, req);
+        sendError(res, isDuplicateError ? 409 : 500, isDuplicateError ? 'Dit emailadres of deze gebruiker bestaat al.' : 'Er is een fout opgetreden bij het aanmaken van de gebruiker.', error, req);
     }
 });
 
@@ -314,18 +314,16 @@ router.post('/:userId/send-new-password', async (req, res) => {
                 });
             } else {
                 console.warn(`⚠️ [userRoutes] New password email failed for ${user.email}:`, emailResult.error);
-                res.json({ 
-                    success: false, 
-                    error: `Email versturen mislukt: ${emailResult.error}`,
-                    newPasswordForManualDelivery: newTempPassword 
+                res.json({
+                    success: false,
+                    error: 'Wachtwoord is gereset, maar de email kon niet worden verzonden. Probeer het opnieuw of neem contact op met support.'
                 });
             }
         } catch (emailError) {
             console.error(`❌ [userRoutes] Error sending new password email:`, emailError);
-            res.json({ 
-                success: false, 
-                error: `Wachtwoord gereset, maar email fout: ${emailError.message}`,
-                newPasswordForManualDelivery: newTempPassword 
+            res.json({
+                success: false,
+                error: 'Wachtwoord is gereset, maar er ging iets mis met het versturen van de email. Probeer het opnieuw.'
             });
         }
     } catch (error) {

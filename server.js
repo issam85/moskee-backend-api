@@ -29,6 +29,13 @@ const { handleStripeWebhook } = require('./services/stripeService');
 require('./jobs/sessionRetryJob');
 console.log('✅ Session retry cron job initialized');
 
+// --- Security Checks at Startup ---
+// SECURITY FIX (H1): Reject startup if JWT_SECRET is too weak
+if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
+  console.error('❌ FATAL: JWT_SECRET must be at least 32 characters long. Current length:', process.env.JWT_SECRET.length);
+  process.exit(1);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -58,11 +65,57 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
+// SECURITY FIX (H5): Add security headers
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
 // Specifieke route voor Stripe Webhook MOET vóór express.json() komen.
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
 // Algemene middleware
 app.use(express.json());
+
+// --- SECURITY FIX (H1): In-memory rate limiter ---
+const rateLimitStore = new Map();
+
+function rateLimit(windowMs, maxRequests) {
+  return (req, res, next) => {
+    const ip = req.ip || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+    const key = `${req.path}:${ip}`;
+    const now = Date.now();
+    const entry = rateLimitStore.get(key);
+
+    if (!entry || now > entry.resetAt) {
+      rateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    if (entry.count >= maxRequests) {
+      return res.status(429).json({ error: 'Te veel verzoeken. Probeer het later opnieuw.' });
+    }
+    entry.count++;
+    next();
+  };
+}
+
+// Clean expired entries every minute
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of rateLimitStore) {
+    if (now > val.resetAt) rateLimitStore.delete(key);
+  }
+}, 60000);
+
+// Apply rate limits to sensitive endpoints
+app.post('/api/auth/login', rateLimit(15 * 60 * 1000, 5));           // 5 per 15 min
+app.post('/api/mosques/register', rateLimit(60 * 60 * 1000, 3));     // 3 per hour
+app.post('/api/email/*', rateLimit(60 * 60 * 1000, 10));             // 10 per hour
+app.post('/api/users/*/send-new-password', rateLimit(60 * 60 * 1000, 10)); // 10 per hour
 
 // --- Publieke Routes & Health Check ---
 app.get('/api/health', (req, res) => {
@@ -73,19 +126,26 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// --- Debug Routes (development only) ---
-app.use('/api/debug', debugRoutes);
+// SECURITY FIX (H2/H3): Debug routes gated behind NODE_ENV === 'development' check
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/debug', debugRoutes);
+} else {
+  app.use('/api/debug', (req, res) => {
+    res.status(404).json({ error: 'Not found.' });
+  });
+}
 
 // --- Route Setup ---
 // 1. Publieke routes (geen authenticatie nodig)
 app.use('/api', authRoutes); // Handelt /api/auth/login en /api/mosques/register af
-app.use('/api/eboekhouden', eboekhoudenRoutes); // eBoekhouden proxy (server-to-server)
 
 // 2. Beveiligde routes (authenticatie vereist)
 app.use(authMiddleware); // Authenticatie middleware
 app.use(checkSubscription); // Abonnementscheck
 
 // 3. Beveiligde API endpoints
+// SECURITY FIX (C4): eBoekhouden routes moved behind auth middleware
+app.use('/api/eboekhouden', eboekhoudenRoutes);
 app.use('/api/mosques', mosqueRoutes); // Handelt /api/mosques/:id, etc. af
 app.use('/api/users', userRoutes);
 app.use('/api/classes', classRoutes);
@@ -95,7 +155,7 @@ app.use('/api/lessen', lessonRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/quran', quranRoutes);
 app.use('/api/email', emailRoutes);
-app.use('/api/trial', trialRoutes); // ✅ ADD THIS LINE
+app.use('/api/trial', trialRoutes);
 
 // --- Error Handling ---
 app.use('*', routeNotFoundHandler);

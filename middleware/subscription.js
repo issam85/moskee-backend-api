@@ -9,9 +9,9 @@ const checkSubscription = async (req, res, next) => {
         return next();
     }
     
-    // Als er geen gebruiker is (bv. door anonieme API call), laat de autorisatie in de route zelf het afhandelen.
+    // SECURITY FIX (H8): Block unauthenticated requests instead of failing open
     if (!req.user) {
-        return next();
+        return sendError(res, 401, 'Authenticatie vereist voor toegang tot deze resource.', null, req);
     }
 
     try {
@@ -23,7 +23,8 @@ const checkSubscription = async (req, res, next) => {
 
         if (error || !mosque) {
             console.warn(`[Subscription Check] Kon moskee ${req.user.mosque_id} niet vinden voor user ${req.user.id}.`);
-            return next(); // Niet blokkeren bij DB fout, log is voldoende.
+            // SECURITY FIX (H8): Block on DB error instead of failing open
+            return sendError(res, 403, 'Kan abonnementsstatus niet verifiëren. Probeer het later opnieuw.', null, req);
         }
 
         // Check 1: Proefperiode verlopen
@@ -48,7 +49,8 @@ const checkSubscription = async (req, res, next) => {
 
     } catch (error) {
         console.error("[Subscription Middleware Error]", error);
-        return next(); // Bij onverwachte fout, niet blokkeren.
+        // SECURITY FIX (H8): Block on unexpected error instead of failing open
+        return sendError(res, 403, 'Fout bij controleren abonnementsstatus.', null, req);
     }
 };
 

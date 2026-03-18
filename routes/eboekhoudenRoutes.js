@@ -72,7 +72,8 @@ router.get('/*', async (req, res) => {
     const data = await proxyGet(path, queryString);
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('eBoekhouden GET proxy error:', err);
+    res.status(500).json({ error: 'Er is een fout opgetreden.' });
   }
 });
 
@@ -102,13 +103,15 @@ router.patch('/*', async (req, res) => {
 
     if (!response.ok) {
       const text = await response.text();
-      return res.status(response.status).json({ error: `eBoekhouden fout ${response.status}: ${text}` });
+      console.error(`eBoekhouden PATCH error ${response.status}:`, text);
+      return res.status(response.status).json({ error: 'Er is een fout opgetreden bij de boekhoudservice.' });
     }
 
     const text = await response.text();
     res.json(text ? JSON.parse(text) : { ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('eBoekhouden PATCH proxy error:', err);
+    res.status(500).json({ error: 'Er is een fout opgetreden.' });
   }
 });
 

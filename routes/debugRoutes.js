@@ -241,8 +241,12 @@ router.post('/test-email', async (req, res) => {
 });
 
 // ✅ NEW: POST test Resend email functionality
+// SECURITY FIX (H2): Added auth check - was previously unauthenticated
 router.post('/test-resend-email', async (req, res) => {
-    
+    if (!req.user || req.user.role !== 'admin') {
+        return sendError(res, 403, "Alleen admins mogen email tests uitvoeren.", null, req);
+    }
+
     const { testEmail } = req.body;
     if (!testEmail) {
         return sendError(res, 400, "Test email adres is verplicht.", null, req);

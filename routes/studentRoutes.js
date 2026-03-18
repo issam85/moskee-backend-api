@@ -176,7 +176,7 @@ router.post('/mosque/:mosqueId', async (req, res) => {
 
         if (studentError) {
             console.error('[ADD STUDENT] Database error:', studentError);
-            return sendError(res, 500, 'Kon leerling niet toevoegen: ' + studentError.message, null, req);
+            return sendError(res, 500, 'Kon leerling niet toevoegen.', studentError, req);
         }
 
         console.log(`[ADD STUDENT] Student toegevoegd: ${newStudent.name} (ID: ${newStudent.id})`);

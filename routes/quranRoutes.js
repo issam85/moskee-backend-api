@@ -211,7 +211,7 @@ router.post('/mosque/:mosqueId/students/:studentId/progress', async (req, res) =
 
         if (progressError) {
             console.error('[UPDATE Quran Progress] Database error:', progressError);
-            return sendError(res, 500, 'Kon voortgang niet bijwerken: ' + progressError.message, null, req);
+            return sendError(res, 500, 'Kon voortgang niet bijwerken.', progressError, req);
         }
 
         console.log(`[UPDATE Quran Progress] Updated soerah ${soerah_number} for student ${student.name} to ${status}`);

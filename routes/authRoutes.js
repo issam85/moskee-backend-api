@@ -36,7 +36,7 @@ router.post('/auth/login', async (req, res) => {
     const { data: { user: supabaseAuthUser, session }, error: signInError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
     if (signInError) {
         if (signInError.message === 'Invalid login credentials') return sendError(res, 401, 'Ongeldige combinatie van email/wachtwoord.', null, req);
-        return sendError(res, 401, `Authenticatiefout: ${signInError.message}`, null, req);
+        return sendError(res, 401, 'Authenticatiefout. Probeer het opnieuw.', signInError, req);
     }
     if (!supabaseAuthUser || !session) return sendError(res, 401, 'Ongeldige inlogpoging.', null, req);
 
@@ -364,8 +364,11 @@ router.post('/mosques/register', async (req, res) => {
   }
 });
 
-// Test routes (unchanged)
+// SECURITY FIX (H3): check-email gated to development only
 router.post('/mosques/check-email', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return sendError(res, 404, 'Endpoint niet beschikbaar.', null, req);
+  }
   try {
     const { email } = req.body;
     if (!email) return sendError(res, 400, 'Email is verplicht.', null, req);
@@ -398,10 +401,14 @@ router.post('/mosques/check-email', async (req, res) => {
   }
 });
 
+// SECURITY FIX (H3): test-welcome-email gated to development only
 router.post('/mosques/test-welcome-email', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return sendError(res, 404, 'Endpoint niet beschikbaar.', null, req);
+  }
   try {
     const { mosqueId, testEmail } = req.body;
-    
+
     if (!mosqueId) {
       return sendError(res, 400, 'Moskee ID is verplicht.', null, req);
     }
