@@ -364,9 +364,9 @@ router.post('/mosques/register', async (req, res) => {
   }
 });
 
-// SECURITY FIX (H3): check-email gated to development only
+// SECURITY FIX (H3): check-email requires admin auth + dev only
 router.post('/mosques/check-email', async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production' || !req.user || req.user.role !== 'admin') {
     return sendError(res, 404, 'Endpoint niet beschikbaar.', null, req);
   }
   try {
@@ -401,9 +401,9 @@ router.post('/mosques/check-email', async (req, res) => {
   }
 });
 
-// SECURITY FIX (H3): test-welcome-email gated to development only
+// SECURITY FIX (H3): test-welcome-email requires admin auth + dev only
 router.post('/mosques/test-welcome-email', async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production' || !req.user || req.user.role !== 'admin') {
     return sendError(res, 404, 'Endpoint niet beschikbaar.', null, req);
   }
   try {

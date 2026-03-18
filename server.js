@@ -53,7 +53,7 @@ const corsOptions = {
     ];
     const allowedOriginPatterns = [
       /^https:\/\/[a-z0-9-]+\.mijnlvs\.nl$/,
-      /^https:\/\/moskee-systeem.*\.vercel\.app$/,
+      /^https:\/\/moskee-systeem(-[a-z0-9]+)*\.vercel\.app$/,
     ];
     if (!origin || whitelist.indexOf(origin) !== -1 || allowedOriginPatterns.some(pattern => pattern.test(origin))) {
       callback(null, true);
