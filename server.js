@@ -139,13 +139,13 @@ if (process.env.NODE_ENV !== 'production') {
 // 1. Publieke routes (geen authenticatie nodig)
 app.use('/api', authRoutes); // Handelt /api/auth/login en /api/mosques/register af
 
-// 2. Beveiligde routes (authenticatie vereist)
+// 2. eBoekhouden proxy (eigen API key verificatie, geen JWT nodig)
+// SECURITY FIX (C4): eigen verifyApiKey middleware in eboekhoudenRoutes.js
+app.use('/api/eboekhouden', eboekhoudenRoutes);
+
+// 3. Beveiligde routes (JWT authenticatie vereist)
 app.use(authMiddleware); // Authenticatie middleware
 app.use(checkSubscription); // Abonnementscheck
-
-// 3. Beveiligde API endpoints
-// SECURITY FIX (C4): eBoekhouden routes moved behind auth middleware
-app.use('/api/eboekhouden', eboekhoudenRoutes);
 app.use('/api/mosques', mosqueRoutes); // Handelt /api/mosques/:id, etc. af
 app.use('/api/users', userRoutes);
 app.use('/api/classes', classRoutes);

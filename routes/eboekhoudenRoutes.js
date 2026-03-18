@@ -64,6 +64,20 @@ async function proxyGet(path, queryString) {
   return res.json();
 }
 
+// API key verificatie — vervangt JWT auth voor service-to-service calls
+function verifyApiKey(req, res, next) {
+  const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+  if (!process.env.EBOEKHOUDEN_API_KEY) {
+    return res.status(500).json({ error: 'Server misconfiguratie: EBOEKHOUDEN_API_KEY ontbreekt.' });
+  }
+  if (!apiKey || apiKey !== process.env.EBOEKHOUDEN_API_KEY) {
+    return res.status(401).json({ error: 'Ongeldige API key.' });
+  }
+  next();
+}
+
+router.use(verifyApiKey);
+
 // Proxy alle GET requests: /api/eboekhouden/:path*
 router.get('/*', async (req, res) => {
   try {

@@ -17,27 +17,19 @@ This audit identified **4 CRITICAL**, **8 HIGH**, **9 MEDIUM**, and **7 LOW** se
 
 ### C1. Production Secrets Committed to Repository
 
-- **File:** `C:\git\moskee-backend\.env` (lines 8-36)
-- **Description:** The `.env` file is tracked in the Git repository and contains live production secrets including:
-  - Supabase URL and anon key (line 11-12)
-  - Resend API key: `re_YY9fE91V_...` (line 26)
-  - Stripe **live** secret key: `sk_live_51RYZj9CHZ9R82JCd...` (line 29)
-  - Stripe webhook secret: `whsec_ME0ALW...` (line 30)
-  - Internal API key (line 8)
-  - JWT secret (line 36)
-- **Impact:** Anyone with repository access can make charges via Stripe, send emails via Resend, access/modify all database records, and impersonate any user. The Stripe key prefix `sk_live_` confirms this is a live production key.
-- **Recommended Fix:**
-  1. **Immediately rotate ALL exposed keys** (Stripe, Resend, Supabase, JWT secret, internal API key).
-  2. Remove `.env` from the repository: `git rm --cached .env`.
-  3. Verify `.env` is in `.gitignore` (it is listed, but the file was still committed before the rule was added).
-  4. Use `git filter-branch` or `git-filter-repo` to purge `.env` from Git history.
-  5. Create a `.env.example` file with placeholder values only.
+- **STATUS: OPGELOST** (2026-03-18)
+- **Verificatie:** `.env` is NOOIT gecommit naar git (bevestigd via `git ls-files .env` en `git log --all -- .env`). `.gitignore` bevatte `.env` al vanaf het begin. Het oorspronkelijke audit rapport was hier incorrect — de analyse was lokaal, niet op git-niveau.
+- **Aanvullende actie genomen:**
+  1. `.env.example` aangemaakt met placeholder waarden (geen echte secrets)
+  2. JWT_SECRET en INTERNAL_API_KEY lokaal vervangen door cryptografisch sterke waarden
+  3. Live Stripe key (`sk_live_`) staat nog in lokale `.env` — moet vervangen worden door `sk_test_` key voor development
+- **TODO voor eigenaar:** Verifieer dat Railway environment variables sterke waarden gebruiken. Roteer JWT_SECRET en INTERNAL_API_KEY ook op Railway.
 
 ### C2. Weak Hardcoded JWT Secret
 
-- **File:** `C:\git\moskee-backend\.env` (line 36)
-- **Description:** The JWT secret is `moskee-al-hijra-super-secure-secret-2024` -- a human-readable, guessable string. Combined with C1 (it is in the repository), any attacker can forge valid JWT tokens to impersonate any user including admins.
-- **Impact:** Complete authentication bypass. An attacker can craft tokens for any user ID and gain full admin access to any mosque.
+- **STATUS: LOKAAL OPGELOST** (2026-03-18) — lokale `.env` bevat nu een cryptografisch sterke 48-byte random secret.
+- **TODO voor eigenaar:** Roteer ook de JWT_SECRET op Railway naar een sterke waarde: `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"`
+- **Let op:** Na het roteren van de JWT_SECRET op Railway worden ALLE bestaande sessies ongeldig. Gebruikers moeten opnieuw inloggen.
 - **Recommended Fix:**
   1. Generate a cryptographically random secret of at least 256 bits (e.g., `openssl rand -base64 64`).
   2. Store it exclusively in Railway environment variables, never in code or `.env` files committed to Git.
@@ -108,10 +100,9 @@ This audit identified **4 CRITICAL**, **8 HIGH**, **9 MEDIUM**, and **7 LOW** se
 
 ### H4. Internal API Key Is Weak and Predictable
 
-- **File:** `C:\git\moskee-backend\.env` (line 8)
-- **Description:** The `INTERNAL_API_KEY` is set to `M0sk33@lh1jr@!@#` -- a short, predictable string using leet-speak substitutions of the organization name. This key protects the cron job endpoint `POST /api/payments/stripe/retry-pending-links` (paymentRoutes.js line 365).
-- **Impact:** Easily guessable key allows unauthorized triggering of payment retry operations.
-- **Recommended Fix:** Generate a cryptographically random API key of at least 32 characters and store it only in Railway environment variables.
+- **STATUS: LOKAAL OPGELOST** (2026-03-18) — lokale `.env` bevat nu een cryptografisch sterke 32-byte random key.
+- **TODO voor eigenaar:** Roteer ook de INTERNAL_API_KEY op Railway naar dezelfde of een nieuwe sterke waarde: `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`
+- **Let op:** Na het roteren moet de cron job configuratie (die deze key gebruikt voor `POST /api/payments/stripe/retry-pending-links`) ook worden bijgewerkt met de nieuwe key.
 
 ### H5. No Security Headers (Helmet)
 
