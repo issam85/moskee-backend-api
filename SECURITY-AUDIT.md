@@ -272,28 +272,44 @@ The following security measures are already in place and working correctly:
 
 ---
 
-## Remediation Priority
+## Voortgang (bijgewerkt 19-03-2026)
 
-| Priority | Issues | Estimated Effort |
-|----------|--------|------------------|
-| **Immediate** (do today) | C1, C2 (rotate all secrets) | 1-2 hours |
-| **Urgent** (this week) | C3, C4, H1, H2, H4 | 4-8 hours |
-| **Soon** (within 2 weeks) | H3, H5, H6, H7, H8 | 4-6 hours |
-| **Planned** (within 1 month) | M1-M9 | 8-12 hours |
-| **Backlog** | L1-L7 | 4-6 hours |
+| Issue | Ernst | Status | Datum |
+|-------|-------|--------|-------|
+| C1 | KRITIEK | **N.V.T.** — .env was nooit gecommit naar git | 18-03 |
+| C2 | KRITIEK | **GEFIXT** — JWT_SECRET geroteerd op Railway (48-byte random) | 18-03 |
+| C3 | KRITIEK | **GEFIXT** — auth middleware retourneert nu 401 | 18-03 |
+| C4 | KRITIEK | **GEFIXT** — eigen verifyApiKey middleware op eBoekhouden routes | 18-03 |
+| H1 | HOOG | **GEFIXT** — in-memory rate limiter op login/register/email/password | 18-03 |
+| H2 | HOOG | **GEFIXT** — debug routes alleen in development + admin-only | 18-03 |
+| H4 | HOOG | **GEFIXT** — INTERNAL_API_KEY geroteerd op Railway (32-byte random) | 18-03 |
+| H5 | HOOG | **GEFIXT** — security headers (HSTS, nosniff, DENY, referrer-policy) | 18-03 |
+| H7 | HOOG | **GEFIXT** — wachtwoord niet meer in API response | 18-03 |
+| H8 | HOOG | **GEFIXT** — subscription middleware faalt nu dicht (401/403) | 18-03 |
+| M1 | MIDDEL | **GEFIXT** — error details niet meer naar client gelekt | 18-03 |
+| H3 | HOOG | OPEN — test email endpoints achter auth zetten | — |
+| H6 | HOOG | OPEN — CORS regex aanscherpen | — |
+| M2 | MIDDEL | OPEN — eBoekhouden proxy path validatie | — |
+| M3 | MIDDEL | OPEN — infinite retry loop (retry counter) | — |
+| M4 | MIDDEL | OPEN — user enumeratie voorkomen | — |
+| M8 | MIDDEL | OPEN — HTML escaping in email templates | — |
+| M9 | MIDDEL | OPEN — crypto.randomBytes() voor wachtwoorden | — |
+
+### Commits
+
+| Commit | Beschrijving | Datum |
+|--------|-------------|-------|
+| `b856c99` | Security hardening: auth, rate limiting, headers, error sanitization | 18-03 |
+| `1eb034f` | eBoekhouden proxy eigen API key auth + secrets hardening | 18-03 |
+| `5eca7a3` | Moskee subdomain endpoint publiek (login race condition fix) | 18-03 |
+
+### Environment Variables (geroteerd/toegevoegd op 18-03-2026)
+
+- `JWT_SECRET` — geroteerd naar cryptografisch sterke waarde (Railway)
+- `INTERNAL_API_KEY` — geroteerd naar 32-byte random (Railway)
+- `EBOEKHOUDEN_API_KEY` — vernieuwd (Railway)
+- `.env.example` — aangemaakt met placeholder waarden
 
 ---
 
-## Summary Statistics
-
-| Severity | Count |
-|----------|-------|
-| CRITICAL | 4 |
-| HIGH | 8 |
-| MEDIUM | 9 |
-| LOW | 7 |
-| **Total** | **28** |
-
----
-
-*End of Security Audit Report*
+*End of Security Audit Report — laatst bijgewerkt 19-03-2026*
