@@ -143,10 +143,12 @@ app.use('/api', authRoutes); // Handelt /api/auth/login en /api/mosques/register
 // SECURITY FIX (C4): eigen verifyApiKey middleware in eboekhoudenRoutes.js
 app.use('/api/eboekhouden', eboekhoudenRoutes);
 
-// 3. Beveiligde routes (JWT authenticatie vereist)
+// 3. Moskee routes (subdomain lookup is publiek, overige routes checken req.user zelf)
+app.use('/api/mosques', mosqueRoutes);
+
+// 4. Beveiligde routes (JWT authenticatie vereist)
 app.use(authMiddleware); // Authenticatie middleware
 app.use(checkSubscription); // Abonnementscheck
-app.use('/api/mosques', mosqueRoutes); // Handelt /api/mosques/:id, etc. af
 app.use('/api/users', userRoutes);
 app.use('/api/classes', classRoutes);
 app.use('/api/students', studentRoutes);
